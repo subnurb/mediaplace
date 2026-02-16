@@ -1,0 +1,7 @@
+uploads/
+output/
+client_secrets.json
+token.pickle
+__pycache__/
+*.pyc
+.env

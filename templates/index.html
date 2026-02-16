@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MP3 to YouTube Video</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f0f0f;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            padding: 40px 20px;
+        }
+        .container {
+            background: #1a1a1a;
+            border-radius: 12px;
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 8px;
+            color: #ff4444;
+            font-size: 1.8em;
+        }
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 30px;
+            font-size: 0.95em;
+        }
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 600;
+            color: #ccc;
+        }
+        input[type="text"], input[type="url"], textarea, select, input[type="file"] {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid #333;
+            border-radius: 8px;
+            background: #262626;
+            color: #e0e0e0;
+            font-size: 0.95em;
+            margin-bottom: 20px;
+        }
+        input[type="file"] { padding: 8px; }
+        textarea { resize: vertical; min-height: 80px; }
+        select { cursor: pointer; }
+        button, .btn {
+            display: inline-block;
+            width: 100%;
+            padding: 14px;
+            background: #ff4444;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+            text-align: center;
+            text-decoration: none;
+        }
+        button:hover, .btn:hover { background: #cc3333; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        .btn-google {
+            background: #4285f4;
+            margin-bottom: 12px;
+        }
+        .btn-google:hover { background: #3367d6; }
+        .btn-logout {
+            background: transparent;
+            border: 1px solid #555;
+            color: #aaa;
+            font-size: 0.85em;
+            padding: 8px;
+            margin-bottom: 20px;
+        }
+        .btn-logout:hover { background: #262626; border-color: #888; color: #ccc; }
+        .auth-status {
+            text-align: center;
+            margin-bottom: 16px;
+            color: #6fcf6f;
+            font-size: 0.9em;
+        }
+        .alert {
+            padding: 14px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 0.95em;
+        }
+        .alert-success {
+            background: #1a3a1a;
+            border: 1px solid #2d6b2d;
+            color: #6fcf6f;
+        }
+        .alert-success a { color: #8fe08f; }
+        .alert-error {
+            background: #3a1a1a;
+            border: 1px solid #6b2d2d;
+            color: #cf6f6f;
+        }
+        .spinner {
+            display: none;
+            text-align: center;
+            margin-top: 16px;
+            color: #aaa;
+        }
+        .spinner.active { display: block; }
+        .loader {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border: 3px solid #444;
+            border-top-color: #ff4444;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+            margin-right: 8px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .login-section {
+            text-align: center;
+            padding: 40px 0;
+        }
+        .login-section p {
+            color: #888;
+            margin-bottom: 24px;
+            line-height: 1.6;
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            margin-bottom: 24px;
+            border-bottom: 2px solid #333;
+        }
+        .tab {
+            flex: 1;
+            padding: 12px;
+            text-align: center;
+            cursor: pointer;
+            color: #888;
+            font-weight: 600;
+            font-size: 0.95em;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: color 0.2s, border-color 0.2s;
+        }
+        .tab:hover { color: #ccc; }
+        .tab.active {
+            color: #ff4444;
+            border-bottom-color: #ff4444;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .platform-hint {
+            color: #666;
+            font-size: 0.82em;
+            margin-top: -14px;
+            margin-bottom: 20px;
+        }
+        .action-buttons {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        .action-buttons .btn,
+        .action-buttons button {
+            flex: 1;
+        }
+        .btn-download {
+            background: #2d7d46;
+        }
+        .btn-download:hover { background: #236835; }
+        .btn-publish {
+            background: #ff4444;
+        }
+        .btn-publish:hover { background: #cc3333; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>MP3 to YouTube</h1>
+        <p class="subtitle">Upload audio + image, publish to YouTube</p>
+
+        {% if success %}
+        <div class="alert alert-success">
+            Video uploaded! <a href="https://www.youtube.com/watch?v={{ video_id }}" target="_blank">Watch on YouTube</a>
+        </div>
+        {% endif %}
+        {% if video_ready %}
+        <div class="alert alert-success">
+            Video generated successfully!
+        </div>
+        <div class="action-buttons">
+            <a href="/download" class="btn btn-download">Download Video</a>
+            <form method="POST" action="/publish" style="margin: 0;">
+                <button type="submit" class="btn btn-publish">Publish to YouTube</button>
+            </form>
+        </div>
+        {% endif %}
+        {% if youtube_signup_required %}
+        <div class="alert alert-error">
+            <strong>YouTube channel required</strong><br><br>
+            Your Google account does not have a YouTube channel yet. Please follow these steps:
+            <ol style="margin: 12px 0 12px 20px; line-height: 1.8;">
+                <li>Go to <a href="https://www.youtube.com" target="_blank" style="color: #e09f6f;">youtube.com</a></li>
+                <li>Make sure you are signed in with the same Google account</li>
+                <li>Click your profile icon (top right)</li>
+                <li>Click <strong>Create a channel</strong></li>
+                <li>Follow the prompts to set up your channel</li>
+            </ol>
+            Once your channel is created, click the button below to retry:
+        </div>
+        {% if has_pending_job %}
+        <form method="POST" action="/retry" style="margin-bottom: 20px;">
+            <button type="submit" style="background: #e08a3a;">Retry Upload</button>
+        </form>
+        {% endif %}
+        {% endif %}
+        {% if error %}
+        <div class="alert alert-error">{{ error }}</div>
+        {% endif %}
+
+        {% if not authenticated %}
+        <div class="login-section">
+            <p>Sign in with your Google account to authorize<br>YouTube uploads to your channel.</p>
+            <a href="/login" class="btn btn-google">Sign in with Google</a>
+        </div>
+        {% else %}
+        <p class="auth-status">Connected to YouTube</p>
+        <a href="/logout" class="btn btn-logout">Sign out</a>
+
+        <div class="tabs">
+            <div class="tab {% if active_tab != 'url' %}active{% endif %}" data-tab="file">Upload Files</div>
+            <div class="tab {% if active_tab == 'url' %}active{% endif %}" data-tab="url">From URL</div>
+        </div>
+
+        <!-- File Upload Tab -->
+        <div class="tab-content {% if active_tab != 'url' %}active{% endif %}" id="tab-file">
+            <form method="POST" action="/upload" enctype="multipart/form-data" class="upload-form">
+                <label for="audio">Audio File (MP3, WAV, etc.)</label>
+                <input type="file" name="audio" id="audio" accept="audio/*" required>
+
+                <label for="image">Cover Image (JPG, PNG)</label>
+                <input type="file" name="image" id="image" accept="image/*" required>
+
+                <label for="title_file">Video Title</label>
+                <input type="text" name="title" id="title_file" placeholder="My awesome track" required>
+
+                <label for="desc_file">Description</label>
+                <textarea name="description" id="desc_file" placeholder="Description of your video..."></textarea>
+
+                <label for="tags_file">Tags (comma-separated)</label>
+                <input type="text" name="tags" id="tags_file" placeholder="music, lofi, chill">
+
+                <label for="animation_file">Video Animation</label>
+                <select name="animation" id="animation_file">
+                    <option value="none">No animation (static image)</option>
+                    <option value="circle_pulse">Circle & Pulse (beat-synced)</option>
+                </select>
+
+                <label for="privacy_file">Privacy</label>
+                <select name="privacy" id="privacy_file">
+                    <option value="unlisted">Unlisted</option>
+                    <option value="public">Public</option>
+                    <option value="private">Private</option>
+                </select>
+
+                <button type="submit">Create & Upload</button>
+                <div class="spinner">
+                    <span class="loader"></span> Processing... This may take a few minutes.
+                </div>
+            </form>
+        </div>
+
+        <!-- URL Tab -->
+        <div class="tab-content {% if active_tab == 'url' %}active{% endif %}" id="tab-url">
+            <form method="POST" action="/upload-url" class="upload-form">
+                <label for="music_url">Music URL</label>
+                <input type="url" name="music_url" id="music_url" placeholder="https://soundcloud.com/artist/track" required>
+                <p class="platform-hint">Supports SoundCloud, YouTube, and more</p>
+
+                <label for="title_url">Video Title (leave empty to use track title)</label>
+                <input type="text" name="title" id="title_url" placeholder="Auto-detected from URL">
+
+                <label for="desc_url">Description</label>
+                <textarea name="description" id="desc_url" placeholder="Description of your video..."></textarea>
+
+                <label for="tags_url">Tags (comma-separated)</label>
+                <input type="text" name="tags" id="tags_url" placeholder="music, lofi, chill">
+
+                <label for="animation_url">Video Animation</label>
+                <select name="animation" id="animation_url">
+                    <option value="none">No animation (static image)</option>
+                    <option value="circle_pulse">Circle & Pulse (beat-synced)</option>
+                </select>
+
+                <label for="privacy_url">Privacy</label>
+                <select name="privacy" id="privacy_url">
+                    <option value="unlisted">Unlisted</option>
+                    <option value="public">Public</option>
+                    <option value="private">Private</option>
+                </select>
+
+                <button type="submit">Create & Upload</button>
+                <div class="spinner">
+                    <span class="loader"></span> Downloading & processing... This may take a few minutes.
+                </div>
+            </form>
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(function(tab) {
+            tab.addEventListener('click', function() {
+                document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+                document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        // Spinner on submit
+        document.querySelectorAll('.upload-form').forEach(function(form) {
+            form.addEventListener('submit', function() {
+                var btn = form.querySelector('button[type="submit"]');
+                var spinner = form.querySelector('.spinner');
+                btn.disabled = true;
+                spinner.classList.add('active');
+            });
+        });
+    </script>
+</body>
+</html>
