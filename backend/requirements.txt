@@ -1,0 +1,16 @@
+django==6.0.2
+django-cors-headers>=4.5
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+requests>=2.31
+rapidfuzz>=3.0
+musicbrainzngs>=0.7
+pyacoustid>=1.2
+yt-dlp
+librosa
+numpy
+Pillow
+openpyxl
+shazamio>=0.8
+psycopg[binary]>=3.1

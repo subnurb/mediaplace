@@ -1,7 +1,49 @@
-uploads/
-output/
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Django ─────────────────────────────────────────────────────────────────────
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+backend/config/settings_private.py
+
+# ── Secrets / credentials ──────────────────────────────────────────────────────
+.env
+.env.*
 client_secrets.json
 token.pickle
-__pycache__/
-*.pyc
-.env
+*.pickle
+
+# ── Media / generated files ────────────────────────────────────────────────────
+backend/uploads/
+backend/output/
+backend/audio_cache/
+
+# ── Node / Frontend ────────────────────────────────────────────────────────────
+node_modules/
+frontend/dist/
+
+# ── OS / Editor ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.iml
+
+# ── Claude Code ────────────────────────────────────────────────────────────────
+.claude/
