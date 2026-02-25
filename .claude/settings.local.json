@@ -4,7 +4,39 @@
       "Bash(winget install:*)",
       "Bash(where:*)",
       "Bash(pip install:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Read(//Users/nurb/.npm/_logs/**)",
+      "Bash(node:*)",
+      "Bash(npm --version)",
+      "Bash(brew list:*)",
+      "Read(//usr/local/bin/**)",
+      "Bash(python3.14:*)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(.venv/bin/pip index versions:*)",
+      "Bash(OAUTHLIB_INSECURE_TRANSPORT=1 .venv/bin/python:*)",
+      "Bash(npm install)",
+      "Bash(npm view:*)",
+      "Bash(npm run build:*)",
+      "Bash(curl:*)",
+      "Bash(brew install:*)",
+      "Read(//usr/local/Cellar/**)",
+      "Bash(pgrep:*)",
+      "Bash(.venv/bin/python manage.py makemigrations:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(/usr/local/bin/npm run build --prefix /Users/nurb/Documents/projects/mediaplace/frontend)",
+      "Bash(/usr/local/bin/node /usr/local/bin/npm run build:*)",
+      "Bash(/usr/local/bin/node:*)",
+      "Bash(source:*)",
+      "Bash(python3 manage.py migrate:*)",
+      "Bash(ls:*)",
+      "Bash(python3:*)",
+      "Bash(/usr/local/bin/ffmpeg:*)",
+      "Read(//usr/**)",
+      "Read(//opt/**)",
+      "Read(//Users/nurb/**)"
+    ],
+    "additionalDirectories": [
+      "/Users/nurb/Documents/projects/mediaplace"
     ]
   }
 }
