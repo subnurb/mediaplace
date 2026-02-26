@@ -15,6 +15,7 @@ from url_downloader import download_from_url
 from video_creator import create_video
 from youtube_uploader import exchange_code_for_user, get_auth_url, upload_video_for_source
 import soundcloud_auth
+import spotify_auth
 import google_auth
 
 UPLOAD_DIR = settings.UPLOAD_DIR
@@ -267,6 +268,52 @@ def soundcloud_callback(request):
     return HttpResponseRedirect(f"{FRONTEND_URL}/?{params}")
 
 
+# ── Spotify OAuth ──────────────────────────────────────────────────────────────
+
+@require_login
+def spotify_connect(request):
+    """Start the Spotify OAuth PKCE flow."""
+    try:
+        auth_url, _state = spotify_auth.get_auth_url(request.user)
+    except ValueError as e:
+        return JsonResponse({"error": str(e)}, status=400)
+    return JsonResponse({"auth_url": auth_url})
+
+
+def spotify_callback(request):
+    """Handle the Spotify OAuth redirect. Recovers user and code_verifier from state.
+
+    State format: "{user_id}.{code_verifier}"
+    """
+    # Spotify sends ?error=... when the user denies or the app is misconfigured
+    spotify_error = request.GET.get("error", "")
+    if spotify_error:
+        return HttpResponseRedirect(
+            f"{FRONTEND_URL}/?auth_error={urllib.parse.quote(spotify_error)}"
+        )
+
+    state = request.GET.get("state", "")
+    code  = request.GET.get("code", "")
+
+    try:
+        user_id_str, code_verifier = state.split(".", 1)
+        user_id = int(user_id_str)
+        user    = User.objects.get(id=user_id)
+    except (ValueError, IndexError, User.DoesNotExist):
+        return HttpResponseRedirect(f"{FRONTEND_URL}/?auth_error=invalid_state")
+
+    if not code:
+        return HttpResponseRedirect(f"{FRONTEND_URL}/?auth_error=no_code")
+
+    try:
+        action, name = spotify_auth.exchange_code_for_user(user, code, code_verifier)
+    except Exception as e:
+        return HttpResponseRedirect(f"{FRONTEND_URL}/?auth_error={urllib.parse.quote(str(e))}")
+
+    params = urllib.parse.urlencode({"spotify": action, "name": name})
+    return HttpResponseRedirect(f"{FRONTEND_URL}/?{params}")
+
+
 # ── Google sign-in OAuth ───────────────────────────────────────────────────────
 
 def google_login(request):
@@ -405,11 +452,6 @@ def job_upload_url(request):
         job_dir = os.path.join(UPLOAD_DIR, job_id)
         result = download_from_url(music_url, job_dir)
 
-        if not result["image_path"]:
-            return JsonResponse(
-                {"error": "Could not fetch cover image from this URL."}, status=422
-            )
-
         if not title:
             title = result["title"]
 
@@ -424,8 +466,15 @@ def job_upload_url(request):
             except (SourceConnection.DoesNotExist, ValueError):
                 pass
 
+        image_path = result["image_path"]
+        if not image_path:
+            return JsonResponse(
+                {"error": "Could not fetch cover image and no embedded art found in the audio file."},
+                status=422,
+            )
+
         video_path = os.path.join(OUTPUT_DIR, f"{job_id}_video.mp4")
-        create_video(result["image_path"], result["audio_path"], video_path, animation=animation)
+        create_video(image_path, result["audio_path"], video_path, animation=animation)
 
         PendingJob.objects.filter(user=request.user).delete()
         job = PendingJob.objects.create(

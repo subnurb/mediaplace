@@ -26,6 +26,9 @@ export default function App() {
     } else if (params.has('soundcloud')) {
       dispatch(setNotification({ platform: 'soundcloud', action: params.get('soundcloud'), name: params.get('name') }))
       window.history.replaceState({}, '', '/')
+    } else if (params.has('spotify')) {
+      dispatch(setNotification({ platform: 'spotify', action: params.get('spotify'), name: params.get('name') }))
+      window.history.replaceState({}, '', '/')
     } else if (params.has('google')) {
       // Google sign-in redirected back — session is already set, just clean the URL
       window.history.replaceState({}, '', '/')

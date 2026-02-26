@@ -26,6 +26,18 @@ export const connectSoundCloud = createAsyncThunk(
   },
 )
 
+export const connectSpotify = createAsyncThunk(
+  'sources/connectSpotify',
+  async (_, { rejectWithValue }) => {
+    try {
+      const res = await api.get('/auth/spotify-connect/')
+      return res.data
+    } catch (err) {
+      return rejectWithValue(err.response?.data?.error || 'Could not start Spotify connection')
+    }
+  },
+)
+
 export const deleteSource = createAsyncThunk(
   'sources/delete',
   async (sourceId, { rejectWithValue }) => {
@@ -77,6 +89,16 @@ const sourcesSlice = createSlice({
         if (action.payload.auth_url) window.location.href = action.payload.auth_url
       })
       .addCase(connectSoundCloud.rejected, (state, action) => {
+        state.loading = false
+        state.error = action.payload
+      })
+
+      // Spotify OAuth: redirect browser to Spotify
+      .addCase(connectSpotify.pending, (state) => { state.loading = true; state.error = null })
+      .addCase(connectSpotify.fulfilled, (_state, action) => {
+        if (action.payload.auth_url) window.location.href = action.payload.auth_url
+      })
+      .addCase(connectSpotify.rejected, (state, action) => {
         state.loading = false
         state.error = action.payload
       })

@@ -36,3 +36,9 @@ GOOGLE_LOGIN_REDIRECT_URI = "http://localhost:8000/api/auth/google/callback/"
 SOUNDCLOUD_CLIENT_ID = "your_soundcloud_client_id"
 SOUNDCLOUD_CLIENT_SECRET = "your_soundcloud_client_secret"
 SOUNDCLOUD_REDIRECT_URI = "http://localhost:8000/api/auth/soundcloud/callback/"
+
+# Spotify OAuth (PKCE — no client secret needed for token exchange)
+# Register your app at https://developer.spotify.com/dashboard
+# Add redirect URI: http://localhost:8000/api/auth/spotify/callback/
+SPOTIFY_CLIENT_ID = "your_spotify_client_id"
+SPOTIFY_REDIRECT_URI = "http://localhost:8000/api/auth/spotify/callback/"

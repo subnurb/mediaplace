@@ -107,8 +107,11 @@ def library_list(request):
         fp = ts.fingerprint
 
         # Group priority: MBID → Shazam ID → per-track fallback
+        # Use content-based keys (mbid value, shazam_id value) rather than fp.id
+        # so tracks with the same MBID/Shazam ID group together even if they have
+        # separate AudioFingerprint records (before identity linking has run).
         if fp and fp.mbid:
-            group_key = f"fp:{fp.id}"
+            group_key = f"mbid:{fp.mbid}"
         elif fp and fp.shazam_id:
             group_key = f"shazam:{fp.shazam_id}"
         else:
@@ -595,6 +598,154 @@ def _run_analyze_all(ts_ids: list):
 
 # ── Background sync worker ────────────────────────────────────────────────────
 
+def _link_by_fingerprint_identity(user_id: int) -> int:
+    """Merge AudioFingerprints for library TrackSources that represent the same recording.
+
+    Scans all fingerprinted TrackSources in the user's library and merges their
+    AudioFingerprint records when they share:
+      1. MBID  (MusicBrainz Recording ID)
+      2. Shazam ID
+      3. ISRC  (at least one in common)
+      4. Local fingerprint Jaccard similarity ≥ 0.15
+
+    Only merges cross-platform pairs (no point merging two SoundCloud tracks).
+    Returns the number of merges performed.
+    """
+    from django.conf import settings
+    from api.models import AudioFingerprint, LocalFingerprint  # noqa: F811
+    from api.sync_views import _merge_fingerprints
+
+    def _safe_merge(fp_id_a: int, fp_id_b: int) -> int:
+        try:
+            return _merge_fingerprints(fp_id_a, fp_id_b)
+        except Exception as exc:
+            logger.warning("[library_sync] fp merge error %s↔%s: %s", fp_id_a, fp_id_b, exc)
+            return fp_id_a
+
+    def _load_ts():
+        return list(
+            TrackSource.objects
+            .filter(library_entries__library_playlist__user_id=user_id,
+                    fingerprint__isnull=False)
+            .select_related("fingerprint")
+            .distinct()
+        )
+
+    all_ts = _load_ts()
+    if not all_ts:
+        return 0
+
+    merged = 0
+
+    # ── 1. MBID matching ──────────────────────────────────────────────────────
+    mbid_map: dict = {}
+    for ts in all_ts:
+        if ts.fingerprint and ts.fingerprint.mbid:
+            mbid_map.setdefault(ts.fingerprint.mbid, []).append(ts)
+
+    for mbid, ts_list in mbid_map.items():
+        fp_ids = list({ts.fingerprint_id for ts in ts_list})
+        if len(fp_ids) < 2:
+            continue
+        if len({ts.platform for ts in ts_list}) < 2:
+            continue  # all same platform — skip
+        winner_id = fp_ids[0]
+        for loser_id in fp_ids[1:]:
+            winner_id = _safe_merge(winner_id, loser_id)
+            merged += 1
+            logger.debug("[library_sync] merged by MBID=%s fp %s←%s", mbid, winner_id, loser_id)
+
+    all_ts = _load_ts()  # refresh after merges
+
+    # ── 2. Shazam ID matching ────────────────────────────────────────────────
+    shazam_map: dict = {}
+    for ts in all_ts:
+        if ts.fingerprint and ts.fingerprint.shazam_id:
+            shazam_map.setdefault(ts.fingerprint.shazam_id, []).append(ts)
+
+    for shazam_id, ts_list in shazam_map.items():
+        fp_ids = list({ts.fingerprint_id for ts in ts_list})
+        if len(fp_ids) < 2:
+            continue
+        if len({ts.platform for ts in ts_list}) < 2:
+            continue
+        winner_id = fp_ids[0]
+        for loser_id in fp_ids[1:]:
+            winner_id = _safe_merge(winner_id, loser_id)
+            merged += 1
+            logger.debug("[library_sync] merged by Shazam=%s fp %s←%s", shazam_id, winner_id, loser_id)
+
+    all_ts = _load_ts()
+
+    # ── 3. ISRC matching ─────────────────────────────────────────────────────
+    isrc_map: dict = {}
+    for ts in all_ts:
+        for isrc in (ts.fingerprint.isrcs or []) if ts.fingerprint else []:
+            isrc_map.setdefault(isrc.strip().upper(), []).append(ts)
+
+    for isrc, ts_list in isrc_map.items():
+        fp_ids = list({ts.fingerprint_id for ts in ts_list})
+        if len(fp_ids) < 2:
+            continue
+        if len({ts.platform for ts in ts_list}) < 2:
+            continue
+        winner_id = fp_ids[0]
+        for loser_id in fp_ids[1:]:
+            winner_id = _safe_merge(winner_id, loser_id)
+            merged += 1
+            logger.debug("[library_sync] merged by ISRC=%s fp %s←%s", isrc, winner_id, loser_id)
+
+    # ── 4. Local fingerprint similarity ──────────────────────────────────────
+    if getattr(settings, "LOCAL_FINGERPRINT_ENABLED", False):
+        all_ts = _load_ts()
+        lfp_by_ts_id = {
+            lfp.track_source_id: lfp
+            for lfp in LocalFingerprint.objects.filter(
+                track_source_id__in=[ts.id for ts in all_ts]
+            )
+        }
+
+        import local_fingerprint_service
+
+        # Group by platform — only compare cross-platform pairs
+        by_platform: dict = {}
+        for ts in all_ts:
+            if ts.id in lfp_by_ts_id:
+                by_platform.setdefault(ts.platform, []).append(ts)
+
+        _MAX_PER_PLATFORM = 150  # cap O(n²) comparisons
+        platform_keys = list(by_platform.keys())
+        for i in range(len(platform_keys)):
+            for j in range(i + 1, len(platform_keys)):
+                p_a = by_platform[platform_keys[i]][:_MAX_PER_PLATFORM]
+                p_b = by_platform[platform_keys[j]][:_MAX_PER_PLATFORM]
+                for ts_a in p_a:
+                    for ts_b in p_b:
+                        if ts_a.fingerprint_id == ts_b.fingerprint_id:
+                            continue  # already linked
+                        lfp_a = lfp_by_ts_id.get(ts_a.id)
+                        lfp_b = lfp_by_ts_id.get(ts_b.id)
+                        if not lfp_a or not lfp_b:
+                            continue
+                        try:
+                            sim = local_fingerprint_service.similarity(
+                                lfp_a.fingerprint_data, lfp_b.fingerprint_data
+                            )
+                            if sim >= 0.15:
+                                _safe_merge(ts_a.fingerprint_id, ts_b.fingerprint_id)
+                                merged += 1
+                                logger.debug(
+                                    "[library_sync] merged by local FP ts=%s↔ts=%s jaccard=%.3f",
+                                    ts_a.id, ts_b.id, sim,
+                                )
+                        except Exception as exc:
+                            logger.debug("[library_sync] local FP sim error: %s", exc)
+
+    if merged:
+        logger.info("[library_sync] identity linking: %d merge(s) for user=%s", merged, user_id)
+    return merged
+
+
 def _run_library_sync(library_playlist_id: int):
     """Import tracks from a tracked playlist, then fingerprint new ones."""
     from django.db import close_old_connections
@@ -781,10 +932,65 @@ def _run_library_sync(library_playlist_id: int):
                 except Exception as exc:
                     logger.warning("[library_sync] fingerprint failed ts=%s: %s", ts.id, exc)
 
-                # Update progress 50→100 (fingerprint phase)
+                # Update progress 50→80 (fingerprint phase)
                 if total_fp > 0:
-                    p = 50 + int((j + 1) / total_fp * 50)
+                    p = 50 + int((j + 1) / total_fp * 30)
                     _set_progress(p, "fingerprinting")
+
+        if _stopped():
+            return
+
+        # ── Phase 2.5: enrich already-fingerprinted tracks missing Shazam / local FP
+        # Runs Shazam (subprocess) and local FP on tracks fingerprinted in a
+        # previous sync that didn't have these enrichments yet.  No-ops when
+        # data is already present, so this is safe to run every sync.
+        from django.conf import settings as _settings
+        from api.sync_views import _run_shazam_sync, _run_local_fingerprint_sync
+
+        shazam_on = getattr(_settings, "SHAZAM_ENABLED", False)
+        local_fp_on = getattr(_settings, "LOCAL_FINGERPRINT_ENABLED", False)
+
+        if shazam_on or local_fp_on:
+            _set_progress(81, "enriching")
+            needs_enrich = list(
+                TrackSource.objects
+                .filter(library_entries__library_playlist=lp, fingerprint__isnull=False)
+                .select_related("fingerprint")
+                .distinct()
+            )
+            total_enrich = len(needs_enrich)
+            for k, ts in enumerate(needs_enrich):
+                if _stopped():
+                    break
+                close_old_connections()
+                fp = ts.fingerprint
+                if not fp:
+                    continue
+                try:
+                    if shazam_on and not fp.shazam_id:
+                        _run_shazam_sync(fp.id, ts.id)
+                        fp.refresh_from_db()
+                    if local_fp_on:
+                        _run_local_fingerprint_sync(ts.id, None)
+                except Exception as exc:
+                    logger.warning("[library_sync] enrich error ts=%s: %s", ts.id, exc)
+                if total_enrich > 0:
+                    p = 81 + int((k + 1) / total_enrich * 9)
+                    _set_progress(p, "enriching")
+
+        if _stopped():
+            return
+
+        # ── Phase 3: cross-platform identity linking ──────────────────────────
+        # Uses MBID / Shazam ID / ISRC / local FP to merge fingerprint records
+        # for tracks from different platforms that are the same recording.
+        _set_progress(91, "linking")
+        try:
+            _link_by_fingerprint_identity(lp.user.id)
+        except Exception as exc:
+            logger.warning("[library_sync] identity linking error: %s", exc)
+
+        _set_progress(100, "done")
 
     except Exception as exc:
         logger.error("[library_sync] error playlist=%s: %s", library_playlist_id, exc, exc_info=True)

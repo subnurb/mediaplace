@@ -275,7 +275,7 @@ class SyncTrack(models.Model):
 
     # Match result (populated after analysis)
     match_confidence = models.FloatField(null=True, blank=True)
-    target_video_id = models.CharField(max_length=100, blank=True)  # YouTube video ID
+    target_video_id = models.CharField(max_length=500, blank=True)  # YouTube video ID or SoundCloud permalink URL
     target_title = models.CharField(max_length=400, blank=True)     # matched video title
 
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)

@@ -18,6 +18,10 @@ urlpatterns = [
     path("auth/soundcloud-connect/", views.soundcloud_connect),
     path("auth/soundcloud/callback/", views.soundcloud_callback),
 
+    # Spotify OAuth
+    path("auth/spotify-connect/", views.spotify_connect),
+    path("auth/spotify/callback/", views.spotify_callback),
+
     # Google sign-in
     path("auth/google/", views.google_login),
     path("auth/google/callback/", views.google_callback),

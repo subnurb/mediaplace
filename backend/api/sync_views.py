@@ -37,6 +37,14 @@ from youtube_uploader import upload_video_for_source
 
 OUTPUT_DIR = settings.OUTPUT_DIR
 
+# yt-dlp needs a JavaScript runtime for YouTube format extraction.
+# Node.js ships at this path on macOS (Homebrew Intel); adjust if deployed elsewhere.
+_NODE_PATH = "/usr/local/bin/node"
+_YTDL_JS_OPTS: dict = (
+    {"js_runtimes": {"node": {"path": _NODE_PATH}}}
+    if os.path.exists(_NODE_PATH) else {}
+)
+
 
 # ── Source-type dispatchers ───────────────────────────────────────────────────
 
@@ -48,6 +56,9 @@ def _get_playlists_for_source(source):
         return get_playlists(source)
     if source.source_type == ST.YOUTUBE_PUBLISH:
         from youtube_service import get_playlists
+        return get_playlists(source)
+    if source.source_type == ST.SPOTIFY:
+        from spotify_service import get_playlists
         return get_playlists(source)
     raise NotImplementedError(
         f"Playlist browsing is not yet supported for {source.get_source_type_display()}."
@@ -62,6 +73,9 @@ def _get_tracks_for_source(source, playlist_id):
         return get_playlist_tracks(source, playlist_id)
     if source.source_type == ST.YOUTUBE_PUBLISH:
         from youtube_service import get_playlist_tracks
+        return get_playlist_tracks(source, playlist_id)
+    if source.source_type == ST.SPOTIFY:
+        from spotify_service import get_playlist_tracks
         return get_playlist_tracks(source, playlist_id)
     raise NotImplementedError(
         f"Track fetching is not yet supported for {source.get_source_type_display()}."
@@ -83,6 +97,10 @@ def _find_match_on_target(source_to, source_title, source_artist, source_duratio
         from soundcloud_service import find_soundcloud_match
         return find_soundcloud_match(source_to, source_title, source_artist, source_duration_ms,
                                      isrc=source_isrc, exclude_ids=exclude_ids)
+    if source_to.source_type == ST.SPOTIFY:
+        from spotify_service import find_spotify_match
+        return find_spotify_match(source_to, source_title, source_artist, source_duration_ms,
+                                  isrc=source_isrc, exclude_ids=exclude_ids)
     raise NotImplementedError(
         f"Track matching is not yet supported for {source_to.get_source_type_display()}."
     )
@@ -238,6 +256,7 @@ def _get_or_download_audio(platform: str, track_id: str, url: str) -> str | None
     name_base = f"{platform}_{safe_id}"
 
     ydl_opts = {
+        **_YTDL_JS_OPTS,
         "format": "bestaudio/best",
         "outtmpl": os.path.join(cache_dir, f"{name_base}.%(ext)s"),
         "quiet": not settings.DEBUG,
@@ -253,10 +272,11 @@ def _get_or_download_audio(platform: str, track_id: str, url: str) -> str | None
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-    except Exception:
-        if settings.DEBUG:
-            traceback.print_exc()
+    except yt_dlp.utils.DownloadError as exc:
+        logger.warning("[audio_cache] download failed for %s: %s", url, exc)
         # Don't return yet — postprocessor failures sometimes still produce a file
+    except Exception as exc:
+        logger.warning("[audio_cache] unexpected error for %s: %s", url, exc, exc_info=True)
 
     # Find the downloaded/converted file (prefer .mp3, accept any extension)
     audio_path = None
@@ -304,6 +324,7 @@ def _download_audio_snippet(url: str, dest_dir: str, prefix: str,
         return None
 
     ydl_opts = {
+        **_YTDL_JS_OPTS,
         "format": "bestaudio[ext=mp3]/bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio",
         "outtmpl": os.path.join(dest_dir, f"{prefix}.%(ext)s"),
         "quiet": not settings.DEBUG,
@@ -314,9 +335,11 @@ def _download_audio_snippet(url: str, dest_dir: str, prefix: str,
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-    except Exception:
-        if settings.DEBUG:
-            traceback.print_exc()
+    except yt_dlp.utils.DownloadError as exc:
+        logger.warning("[snippet] download failed for %s: %s", url, exc)
+        return None
+    except Exception as exc:
+        logger.warning("[snippet] unexpected error for %s: %s", url, exc, exc_info=True)
         return None
 
     for fname in sorted(os.listdir(dest_dir)):
@@ -329,6 +352,8 @@ def _target_url(sync_track: SyncTrack, target_source_type: str) -> str:
     """Build the playable URL for the matched target track."""
     if target_source_type == SourceConnection.SourceType.YOUTUBE_PUBLISH:
         return f"https://www.youtube.com/watch?v={sync_track.target_video_id}"
+    if target_source_type == SourceConnection.SourceType.SPOTIFY:
+        return f"https://open.spotify.com/track/{sync_track.target_video_id}"
     return sync_track.target_video_id
 
 
@@ -355,12 +380,11 @@ def _get_or_build_fingerprint(platform: str, track_id: str,
         # Missing bpm/key means AcousticBrainz returned nothing (shut down 2022);
         # fall through so the librosa fallback can fill them in.
         if not fp.is_stale() and (fp.bpm is not None or fp.key):
-            # Schedule Shazam + local FP enrichment for tracks that already have
-            # a fingerprint — these are daemon threads and won't block the sync.
             if getattr(settings, "SHAZAM_ENABLED", False) and not fp.shazam_id:
-                _schedule_shazam_enrichment(fp.id, track_source.id)
+                _run_shazam_sync(fp.id, track_source.id)
+                fp.refresh_from_db()
             if getattr(settings, "LOCAL_FINGERPRINT_ENABLED", False):
-                _schedule_local_fingerprint(track_source.id, None)
+                _run_local_fingerprint_sync(track_source.id, None)
             return fp
 
     # Use the persistent audio cache; fall back to a temp snippet if cache download fails
@@ -446,108 +470,153 @@ def _get_or_build_fingerprint(platform: str, track_id: str,
         )
         track_source = ts_obj
 
-    # ── ShazamIO + local fingerprint — fire-and-forget daemon threads ─────────
-    # These run AFTER the fingerprint is returned so they never block or crash
-    # the sync.  Native extensions (shazamio-core / librosa) can segfault; by
-    # running in a separate thread the sync job itself is unaffected even if
-    # the process eventually dies (very rare).  Use settings to opt in.
+    # ── ShazamIO + local fingerprint — run synchronously so results feed into
+    # _apply_audio_score for the Level-3 confidence calculation.
+    # Shazam runs via subprocess (crash-safe); local FP via librosa.
     if getattr(settings, "SHAZAM_ENABLED", False) and not audio_fp.shazam_id:
-        _schedule_shazam_enrichment(audio_fp.id, track_source.id if track_source else None)
+        _run_shazam_sync(audio_fp.id, track_source.id if track_source else None)
+        audio_fp.refresh_from_db()
 
     if getattr(settings, "LOCAL_FINGERPRINT_ENABLED", False) and track_source:
-        _schedule_local_fingerprint(track_source.id, audio_path)
+        _run_local_fingerprint_sync(track_source.id, audio_path)
 
     return audio_fp
 
 
+def _run_shazam_sync(fp_id: int, ts_id: int | None) -> None:
+    """Identify audio via ShazamIO and persist results (blocking).
+
+    Runs shazam_service.py as a child subprocess so a segfault in the Rust
+    extension only kills that child — the calling thread returns normally
+    either way.  No-ops immediately if the fingerprint already has a shazam_id
+    or no cached audio file is available.
+    """
+    import json
+    import subprocess
+    import sys
+    from api.models import AudioFingerprint as _AF, TrackSource as _TS
+
+    try:
+        audio_path = None
+        if ts_id:
+            ts = _TS.objects.filter(id=ts_id).first()
+            if ts:
+                try:
+                    ca = ts.cached_audio
+                    if ca.file_path and os.path.exists(ca.file_path):
+                        audio_path = ca.file_path
+                except Exception:
+                    pass
+        if not audio_path:
+            return
+
+        service_script = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "shazam_service.py"
+        )
+        try:
+            proc = subprocess.run(
+                [sys.executable, service_script, audio_path],
+                capture_output=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("[shazam] subprocess timed out for fp=%s", fp_id)
+            return
+        except Exception as exc:
+            logger.warning("[shazam] subprocess error fp=%s: %s", fp_id, exc)
+            return
+
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return
+
+        try:
+            shazam_data = json.loads(proc.stdout.decode())
+        except Exception:
+            return
+
+        if not shazam_data or not shazam_data.get("shazam_id"):
+            return
+
+        fp = _AF.objects.filter(id=fp_id).first()
+        if not fp or fp.shazam_id:
+            return
+
+        update_fields = []
+        for fp_field, data_key in [
+            ("shazam_id", "shazam_id"),
+            ("shazam_title", "title"),
+            ("shazam_artist", "artist"),
+            ("shazam_album", "album"),
+            ("shazam_genre", "genre"),
+            ("shazam_spotify_uri", "spotify_uri"),
+            ("shazam_cover_url", "cover_url"),
+        ]:
+            value = shazam_data.get(data_key, "")
+            if value and not getattr(fp, fp_field):
+                setattr(fp, fp_field, value)
+                update_fields.append(fp_field)
+
+        if update_fields:
+            update_fields.append("updated_at")
+            fp.save(update_fields=update_fields)
+            logger.debug("[shazam] fp=%s  id=%s  title=%s",
+                         fp.id, fp.shazam_id, fp.shazam_title)
+    except Exception as exc:
+        logger.warning("[shazam] enrichment error fp=%s: %s", fp_id, exc)
+
+
 def _schedule_shazam_enrichment(fp_id: int, ts_id: int | None) -> None:
-    """Run ShazamIO in a daemon thread — completely decoupled from the caller."""
+    """Run _run_shazam_sync in a daemon thread (for non-L3 callers)."""
     import threading
 
     def _worker():
         from django.db import close_old_connections
         close_old_connections()
         try:
-            import shazam_service
-            from api.models import AudioFingerprint as _AF, TrackSource as _TS
-
-            # Resolve audio path from cached audio
-            audio_path = None
-            if ts_id:
-                ts = _TS.objects.filter(id=ts_id).first()
-                if ts:
-                    try:
-                        ca = ts.cached_audio
-                        if ca.file_path and os.path.exists(ca.file_path):
-                            audio_path = ca.file_path
-                    except Exception:
-                        pass
-            if not audio_path:
-                return
-
-            shazam_data = shazam_service.recognize_audio(audio_path)
-            if not shazam_data or not shazam_data.get("shazam_id"):
-                return
-
-            fp = _AF.objects.filter(id=fp_id).first()
-            if not fp or fp.shazam_id:
-                return
-
-            update_fields = []
-            for fp_field, data_key in [
-                ("shazam_id", "shazam_id"),
-                ("shazam_title", "title"),
-                ("shazam_artist", "artist"),
-                ("shazam_album", "album"),
-                ("shazam_genre", "genre"),
-                ("shazam_spotify_uri", "spotify_uri"),
-                ("shazam_cover_url", "cover_url"),
-            ]:
-                value = shazam_data.get(data_key, "")
-                if value and not getattr(fp, fp_field):
-                    setattr(fp, fp_field, value)
-                    update_fields.append(fp_field)
-
-            if update_fields:
-                update_fields.append("updated_at")
-                fp.save(update_fields=update_fields)
-                logger.debug("[shazam] fp=%s  id=%s  title=%s",
-                             fp.id, fp.shazam_id, fp.shazam_title)
-        except Exception as exc:
-            logger.warning("[shazam] enrichment error fp=%s: %s", fp_id, exc)
+            _run_shazam_sync(fp_id, ts_id)
         finally:
             close_old_connections()
 
     threading.Thread(target=_worker, daemon=True).start()
 
 
+def _run_local_fingerprint_sync(ts_id: int, audio_path: str | None) -> None:
+    """Compute and store a Dejavu-style LocalFingerprint (blocking).
+
+    No-ops if the fingerprint already exists for this TrackSource.
+    """
+    from api.models import LocalFingerprint, TrackSource as _TS
+
+    try:
+        if LocalFingerprint.objects.filter(track_source_id=ts_id).exists():
+            return
+        path = audio_path
+        if not path:
+            ts = _TS.objects.filter(id=ts_id).first()
+            if ts:
+                try:
+                    ca = ts.cached_audio
+                    if ca.file_path and os.path.exists(ca.file_path):
+                        path = ca.file_path
+                except Exception:
+                    pass
+        if not path:
+            return
+        import local_fingerprint_service
+        local_fingerprint_service.store_fingerprint(ts_id, path)
+    except Exception as exc:
+        logger.warning("[local_fp] store error ts=%s: %s", ts_id, exc)
+
+
 def _schedule_local_fingerprint(ts_id: int, audio_path: str | None) -> None:
-    """Compute and store a Dejavu-style LocalFingerprint in a daemon thread."""
+    """Run _run_local_fingerprint_sync in a daemon thread (for non-L3 callers)."""
     import threading
 
     def _worker():
         from django.db import close_old_connections
-        from api.models import LocalFingerprint, TrackSource as _TS
         close_old_connections()
         try:
-            if LocalFingerprint.objects.filter(track_source_id=ts_id).exists():
-                return
-            path = audio_path
-            if not path:
-                ts = _TS.objects.filter(id=ts_id).first()
-                if ts:
-                    try:
-                        ca = ts.cached_audio
-                        if ca.file_path and os.path.exists(ca.file_path):
-                            path = ca.file_path
-                    except Exception:
-                        pass
-            if not path:
-                return
-            import local_fingerprint_service
-            local_fingerprint_service.store_fingerprint(ts_id, path)
-        except Exception as exc:
-            logger.warning("[local_fp] store error ts=%s: %s", ts_id, exc)
+            _run_local_fingerprint_sync(ts_id, audio_path)
         finally:
             close_old_connections()
 
@@ -1131,7 +1200,7 @@ def sync_resolve_url(request, job_id, track_id):
         title = ""
         artist = ""
         try:
-            opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+            opts = {**_YTDL_JS_OPTS, "quiet": True, "no_warnings": True, "skip_download": True}
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
                 title = info.get("track") or info.get("title") or ""
@@ -1301,9 +1370,10 @@ def _run_analysis(job_id: int):
             ]
             for f in as_completed(futs):
                 try:
-                    _apply_match_result(f.result())  # serial write — SQLite-safe
-                except Exception:
-                    pass
+                    _apply_match_result(f.result())
+                except Exception as exc:
+                    logger.error("[sync_analysis] job=%s _apply_match_result failed: %s",
+                                 job_id, exc, exc_info=True)
 
         # 4. Level 3 — audio feature comparison for UNCERTAIN tracks (parallel)
         _run_level3_audio_check(job)
@@ -1362,6 +1432,9 @@ def _playlist_existing_ids(source_to, playlist_id: str) -> set:
     if source_to.source_type == ST.SOUNDCLOUD:
         from soundcloud_service import get_playlist_track_ids
         return get_playlist_track_ids(source_to, playlist_id)
+    if source_to.source_type == ST.SPOTIFY:
+        from spotify_service import get_playlist_track_ids
+        return get_playlist_track_ids(source_to, playlist_id)
     return set()
 
 
@@ -1397,6 +1470,17 @@ def _add_to_playlist(source_to, playlist_id: str, track_ids: list) -> dict:
             else:
                 failed = len(new_ids)
 
+    elif source_to.source_type == ST.SPOTIFY:
+        from spotify_service import add_tracks_to_playlist
+        new_ids = [t for t in track_ids if t not in existing]
+        already_existed = len(track_ids) - len(new_ids)
+        if new_ids:
+            ok = add_tracks_to_playlist(source_to, playlist_id, new_ids)
+            if ok:
+                added = len(new_ids)
+            else:
+                failed = len(new_ids)
+
     return {"added": added, "already_existed": already_existed, "failed": failed}
 
 
@@ -1420,6 +1504,9 @@ def _run_push(job_id: int, target_playlist_id: str | None, new_playlist_name: st
                 pl = create_playlist(source_to, new_playlist_name)
             elif source_to.source_type == ST.SOUNDCLOUD:
                 from soundcloud_service import create_playlist
+                pl = create_playlist(source_to, new_playlist_name)
+            elif source_to.source_type == ST.SPOTIFY:
+                from spotify_service import create_playlist
                 pl = create_playlist(source_to, new_playlist_name)
             else:
                 raise NotImplementedError("Playlist creation not supported for this platform.")
@@ -1511,6 +1598,29 @@ def _run_push(job_id: int, target_playlist_id: str | None, new_playlist_name: st
                         SyncTrack.objects.filter(id=track_obj.id).update(pushed_to_playlist=True)
                 else:
                     failed += len(new_pairs)
+
+        elif source_to.source_type == ST.SPOTIFY:
+            from spotify_service import add_tracks_to_playlist
+
+            # target_video_id for Spotify matches is a bare track ID (22-char alphanumeric)
+            new_ids = [t.target_video_id for t in eligible_tracks if t.target_video_id not in existing]
+            already_existed = len(eligible_tracks) - len(new_ids)
+
+            # Mark already-present tracks as pushed
+            for track_obj in eligible_tracks:
+                if track_obj.target_video_id in existing:
+                    SyncTrack.objects.filter(id=track_obj.id).update(pushed_to_playlist=True)
+
+            if new_ids:
+                ok = add_tracks_to_playlist(source_to, target_playlist_id, new_ids)
+                if ok:
+                    added = len(new_ids)
+                    new_id_set = set(new_ids)
+                    for track_obj in eligible_tracks:
+                        if track_obj.target_video_id in new_id_set:
+                            SyncTrack.objects.filter(id=track_obj.id).update(pushed_to_playlist=True)
+                else:
+                    failed = len(new_ids)
 
         now = timezone.now()
         SyncJob.objects.filter(id=job_id).update(
@@ -1750,6 +1860,7 @@ def _run_track_upload(sync_track_id: int):
 def _download_audio(url: str, dest_dir: str) -> str:
     """Download best audio from a URL using yt-dlp. Returns the audio file path."""
     ydl_opts = {
+        **_YTDL_JS_OPTS,
         "format": "bestaudio/best",
         "outtmpl": os.path.join(dest_dir, "audio.%(ext)s"),
         "quiet": True,

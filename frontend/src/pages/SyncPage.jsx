@@ -150,7 +150,8 @@ function PlaylistBrowser({ playlists, loading, onSelect }) {
 }
 
 // target_video_id holds the YouTube video ID for YT targets,
-// or the SoundCloud permalink URL for SC targets.
+// the SoundCloud permalink URL for SC targets,
+// or the bare Spotify track ID for Spotify targets.
 const TARGET_LINK_CONFIG = {
   youtube_publish: {
     icon: 'bi-youtube',
@@ -161,6 +162,11 @@ const TARGET_LINK_CONFIG = {
     icon: 'bi-soundwave',
     color: 'text-warning',
     href: (id) => id, // stored as full permalink URL
+  },
+  spotify: {
+    icon: 'bi-music-note-beamed',
+    color: 'text-success',
+    href: (id) => `https://open.spotify.com/track/${id}`,
   },
 }
 
@@ -354,6 +360,7 @@ function TrackRowInner({ track, jobId, sourceType, targetType, dispatch }) {
 const PLATFORM_SEARCH_URL = {
   youtube_publish: (q) => `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`,
   soundcloud:      (q) => `https://soundcloud.com/search?q=${encodeURIComponent(q)}`,
+  spotify:         (q) => `https://open.spotify.com/search/${encodeURIComponent(q)}`,
 }
 
 function SearchResultsRow({ track, jobId, targetType, dispatch }) {

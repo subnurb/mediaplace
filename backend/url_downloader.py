@@ -177,6 +177,30 @@ def download_from_url(url, output_dir):
     else:
         image_path = None
 
+    # --- Fallback 1: extract embedded art from the MP3 via FFmpeg ---
+    if not image_path and os.path.exists(final_audio):
+        extracted = os.path.join(output_dir, f"{safe_title}_cover_extracted.jpg")
+        try:
+            ffmpeg_bin = os.path.join(ffmpeg_dir, "ffmpeg")
+            r = subprocess.run(
+                [ffmpeg_bin, "-y", "-i", final_audio, "-an", "-vcodec", "copy", extracted],
+                capture_output=True,
+            )
+            if r.returncode == 0 and os.path.exists(extracted) and os.path.getsize(extracted) > 0:
+                image_path = extracted
+        except Exception:
+            pass
+
+    # --- Fallback 2: black 500×500 placeholder so the upload can proceed ---
+    if not image_path:
+        placeholder = os.path.join(output_dir, f"{safe_title}_cover_placeholder.jpg")
+        try:
+            from PIL import Image as _Image
+            _Image.new("RGB", (500, 500), (0, 0, 0)).save(placeholder, "JPEG")
+            image_path = placeholder
+        except Exception:
+            pass
+
     return {
         "audio_path": final_audio,
         "image_path": image_path,

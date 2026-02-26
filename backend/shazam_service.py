@@ -125,3 +125,26 @@ def recognize_audio(audio_path: str, timeout: int = 30) -> dict | None:
         "spotify_uri": spotify_uri,
         "cover_url": cover_url,
     }
+
+
+if __name__ == "__main__":
+    # Called as a subprocess by _schedule_shazam_enrichment so that a
+    # shazamio-core segfault only kills this child process, not Django.
+    # Usage: python shazam_service.py <audio_path>
+    # Outputs JSON result to stdout, nothing on failure.
+    import json
+    import sys
+
+    # Probe import before doing anything else — exit cleanly if the native
+    # extension is broken (e.g. pyo3_log segfault on Python 3.14) rather
+    # than letting the crash reporter fire.
+    try:
+        from shazamio import Shazam as _Shazam  # noqa: F401
+    except Exception:
+        sys.exit(1)
+
+    if len(sys.argv) < 2:
+        sys.exit(1)
+    _result = recognize_audio(sys.argv[1])
+    if _result:
+        print(json.dumps(_result))

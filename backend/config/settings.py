@@ -46,6 +46,7 @@ SESSION_COOKIE_SAMESITE = "Lax"
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
+    "https://localhost:5173",
 ]
 CORS_ALLOW_CREDENTIALS = True
 
@@ -93,9 +94,9 @@ ACOUSTID_API_KEY = os.environ.get("ACOUSTID_API_KEY", "")
 # Number of tracks matched simultaneously during sync analysis (L1+L2+L3)
 SYNC_ANALYSIS_PARALLELISM = 5
 
-# ShazamIO audio recognition — runs in a daemon thread after fingerprinting.
-# Disabled by default: shazamio-core is a native Rust extension that can
-# crash the process on some platforms.  Enable only when needed.
+# ShazamIO audio recognition — runs in a subprocess after fingerprinting.
+# shazamio-core (Rust) segfaults on Python 3.14 at module init (pyo3_log bug).
+# Leave False until shazamio publishes a Python 3.14-compatible wheel.
 SHAZAM_ENABLED = True
 
 # Local (Dejavu-style) audio fingerprint — also runs in a daemon thread.

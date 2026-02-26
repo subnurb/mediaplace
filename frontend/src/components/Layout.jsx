@@ -1,7 +1,7 @@
 import React from 'react'
 import { useSelector, useDispatch } from 'react-redux'
 import { logoutUser } from '../store/authSlice'
-import { connectYouTube, connectSoundCloud, deleteSource } from '../store/sourcesSlice'
+import { connectYouTube, connectSoundCloud, connectSpotify, deleteSource } from '../store/sourcesSlice'
 import { setActiveTool, clearNotification } from '../store/uiSlice'
 
 const SOURCE_LABELS = {
@@ -32,8 +32,9 @@ const PAGE_TITLES = {
 }
 
 const PLATFORM_META = {
-  youtube:    { label: 'YouTube',    icon: 'bi-youtube',   alertClass: 'alert-danger'  },
-  soundcloud: { label: 'SoundCloud', icon: 'bi-soundwave', alertClass: 'alert-warning' },
+  youtube:    { label: 'YouTube',    icon: 'bi-youtube',             alertClass: 'alert-danger'  },
+  soundcloud: { label: 'SoundCloud', icon: 'bi-soundwave',           alertClass: 'alert-warning' },
+  spotify:    { label: 'Spotify',    icon: 'bi-music-note-beamed',   alertClass: 'alert-success' },
 }
 
 function OAuthNotification({ notification, onDismiss }) {
@@ -74,6 +75,7 @@ export default function Layout({ children }) {
 
   const youtubeSources = sources.filter((s) => s.source_type === 'youtube_publish')
   const soundcloudSources = sources.filter((s) => s.source_type === 'soundcloud')
+  const spotifySources = sources.filter((s) => s.source_type === 'spotify')
 
   const pageTitle = PAGE_TITLES[activeTool] || PAGE_TITLES.dashboard
 
@@ -259,9 +261,38 @@ export default function Layout({ children }) {
                 </button>
               </li>
 
+              {/* Connected Spotify accounts */}
+              {spotifySources.map((source) => (
+                <li key={source.id} className="nav-item">
+                  <div className="nav-link d-flex align-items-center justify-content-between py-1">
+                    <span className="d-flex align-items-center gap-2 text-truncate">
+                      <i className={`bi ${SOURCE_ICONS.spotify}`}></i>
+                      <span className="small text-truncate">{source.name}</span>
+                    </span>
+                    <button
+                      className="btn btn-link btn-sm p-0 text-muted ms-1 flex-shrink-0"
+                      title="Disconnect"
+                      onClick={() => dispatch(deleteSource(source.id))}
+                    >
+                      <i className="bi bi-x-circle"></i>
+                    </button>
+                  </div>
+                </li>
+              ))}
+
+              {/* Connect Spotify button */}
+              <li className="nav-item px-3 py-1">
+                <button
+                  className="btn btn-sm btn-outline-success w-100 d-flex align-items-center gap-2 justify-content-center"
+                  onClick={() => dispatch(connectSpotify())}
+                >
+                  <i className="bi bi-music-note-beamed"></i>
+                  {spotifySources.length > 0 ? 'Add account' : 'Connect Spotify'}
+                </button>
+              </li>
+
               {/* Placeholder rows for future source types */}
               {[
-                { type: 'spotify', label: 'Spotify' },
                 { type: 'deezer', label: 'Deezer' },
               ].map(({ type, label }) => (
                 <li key={type} className="nav-item">
