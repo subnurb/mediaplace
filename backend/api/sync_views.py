@@ -31,6 +31,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from api.models import AudioFingerprint, SourceConnection, SyncJob, SyncTrack, TrackSource
 from api.views import require_login
+from domain.sync.services import classify_sync_error
 from music_matcher import classify_confidence, find_youtube_match
 from video_creator import create_video
 from youtube_uploader import upload_video_for_source
@@ -1636,9 +1637,16 @@ def _run_push(job_id: int, target_playlist_id: str | None, new_playlist_name: st
         if settings.DEBUG:
             traceback.print_exc()
         try:
-            SyncJob.objects.filter(id=job_id).update(status=SyncJob.Status.FAILED)
+            _category, user_message = classify_sync_error(str(exc))
+            SyncJob.objects.filter(id=job_id).update(
+                status=SyncJob.Status.FAILED,
+                error_message=user_message,
+            )
         except Exception:
-            pass
+            try:
+                SyncJob.objects.filter(id=job_id).update(status=SyncJob.Status.FAILED)
+            except Exception:
+                pass
     finally:
         connection.close()
 

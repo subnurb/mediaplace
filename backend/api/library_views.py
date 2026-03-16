@@ -3,10 +3,8 @@
 import json
 import logging
 import os
-import re
 import tempfile
 import threading
-import unicodedata
 
 from django.http import JsonResponse
 from django.utils import timezone
@@ -20,60 +18,19 @@ from api.models import (
     TrackSource,
 )
 from api.views import require_login
+from domain.library.services import (
+    norm_text as _norm,
+    norm_artist as _norm_artist,
+    title_candidates as _title_candidates,
+    group_key_variants,
+    should_merge_groups,
+    pick_best_field,
+)
 
 logger = logging.getLogger(__name__)
 
-# In-memory sets (per-process)
-_fingerprinting_in_progress: set = set()   # TrackSource IDs being fingerprinted
-_stop_requested: set = set()               # LibraryPlaylist IDs whose sync should abort
-
-
-def _norm(s: str) -> str:
-    """Base normalization: accents, parentheticals, lowercase, word-chars only."""
-    if not s:
-        return ""
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    s = s.lower()
-    s = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "", s)   # strip (feat. X), [Remix], etc.
-    s = re.sub(r"[^\w\s]", " ", s)                  # punctuation → space (hyphens too)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-# Suffixes YouTube appends to channel names: "AURORA - Topic", "Vevo", etc.
-_YT_SUFFIX_RE = re.compile(
-    r'\s*[-–]\s*(?:topic|official|music|vevo|records|tv|channel|hd|4k|'
-    r'worldwide|audio|video|lyrics|presents)\s*$',
-    re.I,
-)
-
-# Pattern for "Artist - Song" in a raw title (before normalization collapses hyphens)
-_ARTIST_TITLE_RE = re.compile(r'^(.{2,60}?)\s*[-–]\s*(.{2,}.*)$')
-
-
-def _norm_artist(artist: str) -> str:
-    """Normalize artist name, stripping YouTube channel suffixes (e.g. '- Topic')."""
-    if not artist:
-        return ""
-    artist = _YT_SUFFIX_RE.sub("", artist).strip()
-    return _norm(artist)
-
-
-def _title_candidates(raw_title: str) -> list[str]:
-    """Return normalized title variants.
-
-    If the raw title looks like "Artist - Song", also returns just the
-    song portion so cross-platform grouping works when only one platform
-    embeds the artist in the title.
-    """
-    full = _norm(raw_title)
-    candidates = [full]
-    m = _ARTIST_TITLE_RE.match(raw_title.strip())
-    if m:
-        song_only = _norm(m.group(2).strip())
-        if song_only and song_only != full:
-            candidates.append(song_only)
-    return candidates
+_fingerprinting_in_progress: set = set()
+_stop_requested: set = set()
 
 
 # ── Library list ──────────────────────────────────────────────────────────────
@@ -141,11 +98,8 @@ def library_list(request):
 
         grp = groups[group_key]
 
-        # Prefer longer title/artist across sources
-        if ts.title and len(ts.title) > len(grp["title"]):
-            grp["title"] = ts.title
-        if ts.artist and len(ts.artist) > len(grp["artist"]):
-            grp["artist"] = ts.artist
+        grp["title"] = pick_best_field(grp["title"], ts.title)
+        grp["artist"] = pick_best_field(grp["artist"], ts.artist)
         if grp["duration_ms"] is None and ts.duration_ms is not None:
             grp["duration_ms"] = ts.duration_ms
         if not grp["artwork_url"] and ts.artwork_url:
@@ -183,21 +137,7 @@ def library_list(request):
 
     def _group_keys(grp: dict) -> list[tuple[str, str]]:
         """All (title_key, artist_key) candidates for a group, most-specific first."""
-        na = _norm_artist(grp["artist"])
-        title_cands = _title_candidates(grp["title"])
-        keys: list[tuple[str, str]] = []
-        for tc in title_cands:
-            if not tc:
-                continue
-            if na:
-                keys.append((tc, na))
-        # Title-only secondary key: lets a group with no artist match one with an
-        # artist. Also registered for groups WITH an artist so they are discoverable
-        # by groups that lack artist info (e.g. some YouTube tracks).
-        for tc in title_cands:
-            if tc:
-                keys.append((tc, ""))
-        return keys
+        return group_key_variants(grp["title"], grp["artist"])
 
     key_index: dict[tuple, str] = {}   # key → canonical group_key
     merged_away: set[str] = set()
@@ -238,7 +178,7 @@ def library_list(request):
                 if candidate in merged_away:
                     continue
                 canon_platforms = {s["platform"] for s in groups[candidate]["sources"].values()}
-                if canon_platforms.isdisjoint(curr_platforms):
+                if should_merge_groups(canon_platforms, curr_platforms):
                     matched = candidate
                     break
 

@@ -8,7 +8,7 @@ import {
   setLibraryFilters,
   setLibraryPage,
 } from '../store/librarySlice'
-import { setActiveTool } from '../store/uiSlice'
+import { Link } from 'react-router-dom'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -180,9 +180,7 @@ export default function LibraryPage() {
   const pollRef = useRef(null)
   const fpPollRef = useRef(null)
 
-  // Set active tool for layout highlighting
   useEffect(() => {
-    dispatch(setActiveTool('library'))
     dispatch(fetchLibrarySettings())
   }, [dispatch])
 
@@ -325,9 +323,9 @@ export default function LibraryPage() {
           <i className="bi bi-music-note-list display-1 text-muted mb-3 d-block"></i>
           <h4 className="text-muted">Your library is empty</h4>
           <p className="text-muted mb-4">Add playlists from your connected accounts to build your cross-platform music library.</p>
-          <button className="btn btn-primary" onClick={() => dispatch(setActiveTool('library-settings'))}>
+          <Link to="/library/settings" className="btn btn-primary">
             <i className="bi bi-gear me-2"></i>Library Settings
-          </button>
+          </Link>
         </div>
       </div>
     )
@@ -368,12 +366,9 @@ export default function LibraryPage() {
               <i className="bi bi-activity me-1"></i>Analyze All
             </button>
           )}
-          <button
-            className="btn btn-sm btn-outline-secondary"
-            onClick={() => dispatch(setActiveTool('library-settings'))}
-          >
+          <Link to="/library/settings" className="btn btn-sm btn-outline-secondary">
             <i className="bi bi-gear me-1"></i>Settings
-          </button>
+          </Link>
         </div>
       </div>
 

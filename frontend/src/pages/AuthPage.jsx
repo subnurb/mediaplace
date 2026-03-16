@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
 import { loginUser, registerUser, clearError } from '../store/authSlice'
 import api from '../api/client'
@@ -10,23 +10,53 @@ export default function AuthPage() {
   const [tab, setTab] = useState('login')
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
+  const [googleError, setGoogleError] = useState(null)
+  const [inviteRequired, setInviteRequired] = useState(false)
+  const [inviteCode, setInviteCode] = useState('')
   const [form, setForm] = useState({ username: '', email: '', password: '' })
+
+  useEffect(() => {
+    api.get('/auth/config/').then((res) => {
+      setInviteRequired(res.data.invite_required)
+    }).catch(() => {})
+
+    // Surface backend auth_error messages from OAuth redirects (e.g. bad invite code)
+    const params = new URLSearchParams(window.location.search)
+    const authError = params.get('auth_error')
+    if (authError) {
+      setGoogleError(authError)
+      // Clean the URL so the message doesn't persist on refresh
+      const url = new URL(window.location.href)
+      url.searchParams.delete('auth_error')
+      window.history.replaceState({}, '', url.toString())
+    }
+  }, [])
 
   const set = (field) => (e) => setForm((p) => ({ ...p, [field]: e.target.value }))
 
   const switchTab = (t) => {
     setTab(t)
     setForm({ username: '', email: '', password: '' })
+    setGoogleError(null)
     dispatch(clearError())
   }
 
   const handleGoogleLogin = async () => {
     setGoogleLoading(true)
+    setGoogleError(null)
     try {
-      const res = await api.get('/auth/google/')
+      const params = inviteRequired ? `?invite_code=${encodeURIComponent(inviteCode)}` : ''
+      const res = await api.get(`/auth/google/${params}`)
       window.location.href = res.data.auth_url
-    } catch {
+    } catch (err) {
       setGoogleLoading(false)
+      const msg = err.response?.data?.error || err.message || 'Connection failed'
+      const isNetworkError = msg.includes('Network') || msg.includes('ECONNRESET') || msg.includes('Failed to fetch')
+      setGoogleError(
+        isNetworkError
+          ? 'Cannot reach the backend. Is Django running? If using HTTPS (runsslserver), set VITE_API_TARGET=https://localhost:8000 in frontend/.env.local and restart the dev server.'
+          : msg
+      )
     }
   }
 
@@ -172,6 +202,23 @@ export default function AuthPage() {
             <span className="small text-muted">or</span>
             <hr className="flex-grow-1 m-0" />
           </div>
+          {inviteRequired && (
+            <div className="mb-2">
+              <label className="form-label fw-semibold small mb-1">Invitation code for Google sign-up</label>
+              <div className="input-group input-group-sm">
+                <span className="input-group-text bg-body-secondary border-end-0">
+                  <i className="bi bi-ticket-perforated text-muted"></i>
+                </span>
+                <input
+                  type="text"
+                  className="form-control border-start-0 ps-0"
+                  value={inviteCode}
+                  onChange={(e) => setInviteCode(e.target.value)}
+                  placeholder="Enter your invitation code"
+                />
+              </div>
+            </div>
+          )}
           <button
             className="btn btn-outline-secondary w-100 py-2 d-flex align-items-center justify-content-center gap-2"
             onClick={handleGoogleLogin}
@@ -191,6 +238,11 @@ export default function AuthPage() {
             )}
             <span className="fw-semibold">Continue with Google</span>
           </button>
+          {googleError && (
+            <div className="alert alert-warning small mt-2 mb-0" role="alert">
+              {googleError}
+            </div>
+          )}
 
         </div>
       </div>

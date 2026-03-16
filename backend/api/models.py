@@ -131,6 +131,7 @@ class SyncJob(models.Model):
     target_playlist_id   = models.CharField(max_length=200, blank=True)
     target_playlist_name = models.CharField(max_length=300, blank=True)
     pushed_at            = models.DateTimeField(null=True, blank=True)
+    error_message        = models.TextField(blank=True)  # user-facing message when status=FAILED
 
     class Meta:
         db_table = "sync_jobs"
@@ -148,6 +149,7 @@ class SyncJob(models.Model):
             "target_playlist_id": self.target_playlist_id,
             "target_playlist_name": self.target_playlist_name,
             "pushed_at": self.pushed_at.isoformat() if self.pushed_at else None,
+            "error_message": self.error_message or None,
         }
         if include_tracks:
             data["tracks"] = [t.to_dict() for t in self.tracks.all()]
@@ -444,3 +446,4 @@ class UserProfile(models.Model):
 
     class Meta:
         db_table = "user_profiles"
+

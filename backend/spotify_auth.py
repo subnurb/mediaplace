@@ -2,16 +2,19 @@
 
 Settings required (config/settings_private.py):
   SPOTIFY_CLIENT_ID
-  SPOTIFY_REDIRECT_URI  (optional — defaults to localhost)
+  SPOTIFY_REDIRECT_URI  (optional — defaults to 127.0.0.1)
   (no client secret needed for PKCE token exchange)
 
-The redirect URI must also be registered in the Spotify Developer Dashboard.
+Redirect URI: must be registered in the Spotify Developer Dashboard.
+Spotify does not allow "localhost"; use 127.0.0.1 (or [::1]) for loopback.
+See https://developer.spotify.com/documentation/web-api/concepts/redirect_uri
 """
 
 import base64
 import hashlib
 import json
 import os
+import time
 import urllib.parse
 
 import requests as http
@@ -36,7 +39,7 @@ def _cfg():
     return (
         getattr(settings, "SPOTIFY_CLIENT_ID", ""),
         getattr(settings, "SPOTIFY_REDIRECT_URI",
-                "http://localhost:8000/api/auth/spotify/callback/"),
+                "http://127.0.0.1:8000/api/auth/spotify/callback/"),
     )
 
 
@@ -138,14 +141,28 @@ def exchange_code_for_user(user, code: str, code_verifier: str):
     return "new", display_name
 
 
-def get_access_token(source) -> str | None:
-    """Return the stored access token string, or None."""
+def _ensure_expires_at(token_data: dict) -> None:
+    """Set expires_at from expires_in if missing (for Spotipy-compatible token_info)."""
+    if "expires_at" not in token_data and "expires_in" in token_data:
+        token_data["expires_at"] = int(time.time()) + int(token_data["expires_in"])
+
+
+def get_token_info(source) -> dict | None:
+    """Return the stored token info dict (access_token, refresh_token, expires_at), or None."""
     if not source.credentials_data:
         return None
     try:
-        return json.loads(bytes(source.credentials_data).decode()).get("access_token")
+        data = json.loads(bytes(source.credentials_data).decode())
+        _ensure_expires_at(data)
+        return data
     except Exception:
         return None
+
+
+def get_access_token(source) -> str | None:
+    """Return the stored access token string, or None."""
+    info = get_token_info(source)
+    return info.get("access_token") if info else None
 
 
 def refresh_access_token(source) -> str | None:
@@ -185,6 +202,7 @@ def refresh_access_token(source) -> str | None:
     # Spotify may not return a new refresh_token — keep the old one
     if "refresh_token" not in new_data:
         new_data["refresh_token"] = refresh_token
+    _ensure_expires_at(new_data)
 
     source.credentials_data = json.dumps(new_data).encode()
     source.save(update_fields=["credentials_data", "updated_at"])

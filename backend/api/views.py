@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import traceback
 import urllib.parse
 import uuid
 from functools import wraps
@@ -10,8 +12,15 @@ from django.contrib.auth.models import User
 from django.http import FileResponse, HttpResponseRedirect, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
-from api.models import PendingJob, SourceConnection, UserProfile
+from api.models import (
+    PendingJob,
+    SourceConnection,
+    TrackSource,
+    UserProfile,
+)
 from url_downloader import download_from_url
+
+logger = logging.getLogger(__name__)
 from video_creator import create_video
 from youtube_uploader import exchange_code_for_user, get_auth_url, upload_video_for_source
 import soundcloud_auth
@@ -50,6 +59,13 @@ def _me_payload(user):
         "sources": _user_sources(user),
         "pending_job": pending.to_dict() if pending else None,
     }
+
+
+def auth_config(request):
+    """Public endpoint: tells the frontend whether an invitation code is required."""
+    return JsonResponse({
+        "invite_required": bool(getattr(settings, "INVITATION_CODE", "")),
+    })
 
 
 # ── App authentication ────────────────────────────────────────────────────────
@@ -114,6 +130,19 @@ def app_login(request):
 @require_login
 def app_logout(request):
     logout(request)
+    return JsonResponse({"success": True})
+
+
+@csrf_exempt
+@require_login
+def delete_account(request):
+    if request.method not in {"POST", "DELETE"}:
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    user = request.user
+    username = user.username
+    email = user.email
+    user.delete()
+    logger.info("User account deleted via API: %s <%s>", username, email)
     return JsonResponse({"success": True})
 
 
@@ -245,13 +274,16 @@ def soundcloud_connect(request):
 
 
 def soundcloud_callback(request):
-    """Handle the SoundCloud OAuth redirect. Recovers the user from the state param."""
+    """Handle the SoundCloud OAuth redirect. Recovers user and code_verifier from state.
+
+    State format: "{user_id}.{code_verifier}" (PKCE required by OAuth 2.1).
+    """
     state = request.GET.get("state", "")
     code = request.GET.get("code", "")
 
-    # State format: "<user_id>.<random_token>"
     try:
-        user_id = int(state.split(".")[0])
+        user_id_str, code_verifier = state.split(".", 1)
+        user_id = int(user_id_str)
         user = User.objects.get(id=user_id)
     except (ValueError, IndexError, User.DoesNotExist):
         return HttpResponseRedirect(f"{FRONTEND_URL}/?auth_error=invalid_state")
@@ -260,7 +292,7 @@ def soundcloud_callback(request):
         return HttpResponseRedirect(f"{FRONTEND_URL}/?auth_error=no_code")
 
     try:
-        action, name = soundcloud_auth.exchange_code_for_user(user, code)
+        action, name = soundcloud_auth.exchange_code_for_user(user, code, code_verifier)
     except Exception as e:
         return HttpResponseRedirect(f"{FRONTEND_URL}/?auth_error={urllib.parse.quote(str(e))}")
 
@@ -308,7 +340,20 @@ def spotify_callback(request):
     try:
         action, name = spotify_auth.exchange_code_for_user(user, code, code_verifier)
     except Exception as e:
-        return HttpResponseRedirect(f"{FRONTEND_URL}/?auth_error={urllib.parse.quote(str(e))}")
+        raw = str(e)
+        # Spotify returns 403 for /v1/me when the Spotify account is not allowlisted
+        # in development mode. Surface a clearer message for that specific case.
+        lowered = raw.lower()
+        if "403" in lowered and "/v1/me" in lowered:
+            friendly = (
+                "Spotify connection failed: this Spotify account is not allowed to use this app. "
+                "In Development Mode, the app owner must add your Spotify account under "
+                "\"Users and access\" in the Spotify Developer Dashboard."
+            )
+            msg = urllib.parse.quote(friendly)
+        else:
+            msg = urllib.parse.quote(raw)
+        return HttpResponseRedirect(f"{FRONTEND_URL}/?auth_error={msg}")
 
     params = urllib.parse.urlencode({"spotify": action, "name": name})
     return HttpResponseRedirect(f"{FRONTEND_URL}/?{params}")
@@ -322,8 +367,16 @@ def google_login(request):
         auth_url, state = google_auth.get_login_url()
     except FileNotFoundError as e:
         return JsonResponse({"error": str(e)}, status=400)
+    except Exception as e:
+        logger.exception("Google login URL failed")
+        err_msg = str(e)
+        if settings.DEBUG:
+            err_msg += "\n" + traceback.format_exc()
+        return JsonResponse({"error": err_msg}, status=500)
     # Store state in session for CSRF verification in the callback
     request.session["google_login_state"] = state
+    # Carry the invitation code through the OAuth round-trip
+    request.session["google_invite_code"] = request.GET.get("invite_code", "")
     return JsonResponse({"auth_url": auth_url})
 
 
@@ -361,8 +414,14 @@ def google_callback(request):
         else:
             user = None
 
-        # 3. No existing account — create one
+        # 3. No existing account — check invitation code, then create
         if user is None:
+            required_code = getattr(settings, "INVITATION_CODE", "")
+            invite_code = request.session.pop("google_invite_code", "")
+            if required_code and invite_code != required_code:
+                return HttpResponseRedirect(
+                    f"{FRONTEND_URL}/?auth_error={urllib.parse.quote('Invalid invitation code.')}"
+                )
             base = (email.split("@")[0] if email else name.replace(" ", "").lower()) or "user"
             # Sanitize to valid username characters
             base = "".join(c for c in base if c.isalnum() or c in "_-")[:30] or "user"

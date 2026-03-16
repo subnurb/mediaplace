@@ -1,78 +1,23 @@
 """Spotify Web API helpers for browsing playlists and tracks.
 
-Uses the stored OAuth access token from a SourceConnection.
-All requests go to api.spotify.com/v1 with Authorization: Bearer {token} header.
+Uses Spotipy with a custom auth manager that reads tokens from SourceConnection.
+Same public API and normalized track/playlist shapes as before for sync and library.
 """
 
-import requests as http
-from requests.exceptions import HTTPError
+import spotipy
 
-from spotify_auth import get_access_token, refresh_access_token
-
-_BASE    = "https://api.spotify.com/v1"
-_TIMEOUT = 15
+from spotify_auth_manager import SourceConnectionAuthManager
 
 
-def _headers(source):
-    token = get_access_token(source)
-    if not token:
-        raise ValueError("Spotify source has no valid access token.")
-    return {"Authorization": f"Bearer {token}"}
-
-
-def _get(source, path, params=None):
-    """GET with automatic token-refresh retry on 401."""
-    try:
-        resp = http.get(f"{_BASE}{path}", headers=_headers(source),
-                        params=params or {}, timeout=_TIMEOUT)
-        if resp.status_code == 401:
-            new_token = refresh_access_token(source)
-            if not new_token:
-                raise ValueError(
-                    "Spotify token expired. Please reconnect your Spotify account."
-                )
-            resp = http.get(f"{_BASE}{path}",
-                            headers={"Authorization": f"Bearer {new_token}"},
-                            params=params or {}, timeout=_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json()
-    except HTTPError as e:
-        if e.response is not None and e.response.status_code == 401:
-            raise ValueError(
-                "Spotify token expired. Please reconnect your Spotify account."
-            ) from e
-        raise
-
-
-def _post(source, path, json_body):
-    """POST with automatic token-refresh retry on 401."""
-    try:
-        resp = http.post(f"{_BASE}{path}", headers=_headers(source),
-                         json=json_body, timeout=_TIMEOUT)
-        if resp.status_code == 401:
-            new_token = refresh_access_token(source)
-            if not new_token:
-                raise ValueError(
-                    "Spotify token expired. Please reconnect your Spotify account."
-                )
-            resp = http.post(f"{_BASE}{path}",
-                             headers={"Authorization": f"Bearer {new_token}"},
-                             json=json_body, timeout=_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
-    except HTTPError as e:
-        if e.response is not None and e.response.status_code == 401:
-            raise ValueError(
-                "Spotify token expired. Please reconnect your Spotify account."
-            ) from e
-        raise
+def _sp(source):
+    """Return a Spotipy client authenticated with the given SourceConnection."""
+    return spotipy.Spotify(auth_manager=SourceConnectionAuthManager(source))
 
 
 # ── Track normalization ────────────────────────────────────────────────────────
 
 def _normalize_track(item: dict, position: int = 0) -> dict:
     """Convert a Spotify track object (or playlist item) to unified representation."""
-    # Playlist items wrap the track inside a "track" key
     t = item.get("track", item)
     images   = (t.get("album") or {}).get("images") or []
     artwork  = images[0]["url"] if images else ""
@@ -81,7 +26,7 @@ def _normalize_track(item: dict, position: int = 0) -> dict:
     isrc     = ((t.get("external_ids") or {}).get("isrc") or None)
     track_id = t.get("id", "")
     return {
-        "id":            track_id,                                         # bare Spotify track ID
+        "id":            track_id,
         "title":         t.get("name", ""),
         "artist":        artist,
         "duration_ms":   t.get("duration_ms"),
@@ -96,7 +41,8 @@ def _normalize_track(item: dict, position: int = 0) -> dict:
 
 def get_playlists(source) -> list:
     """Return a list of the user's playlists including a virtual 'Liked Songs' entry."""
-    data  = _get(source, "/me/playlists", {"limit": 50})
+    sp = _sp(source)
+    data  = sp.current_user_playlists(limit=50)
     items = data.get("items", [])
 
     playlists = [
@@ -109,9 +55,8 @@ def get_playlists(source) -> list:
         for p in items if p
     ]
 
-    # Prepend virtual "Liked Songs" entry backed by /me/tracks
     try:
-        liked = _get(source, "/me/tracks", {"limit": 1})
+        liked = sp.current_user_saved_tracks(limit=1)
         playlists.insert(0, {
             "id":          "liked",
             "name":        "Liked Songs",
@@ -131,13 +76,18 @@ def get_playlist_tracks(source, playlist_id: str) -> list:
     if playlist_id == "liked":
         return _get_liked_tracks(source)
 
-    tracks  = []
-    offset  = 0
-    path    = f"/playlists/{playlist_id}/tracks"
-    fields  = "items(track(id,name,artists,duration_ms,album(images),external_ids)),next,total"
+    sp = _sp(source)
+    tracks = []
+    offset = 0
+    limit  = 100
 
     while True:
-        data  = _get(source, path, {"limit": 100, "offset": offset, "fields": fields})
+        data = sp.playlist_items(
+            playlist_id,
+            limit=limit,
+            offset=offset,
+            additional_types=("track",),
+        )
         items = data.get("items", [])
         for item in items:
             t = (item or {}).get("track")
@@ -152,14 +102,13 @@ def get_playlist_tracks(source, playlist_id: str) -> list:
 
 def _get_liked_tracks(source, limit: int = 200) -> list:
     """Fetch the user's liked/saved tracks (all pages up to limit)."""
+    sp = _sp(source)
     tracks = []
     offset = 0
 
     while len(tracks) < limit:
-        data  = _get(source, "/me/tracks", {
-            "limit":  min(50, limit - len(tracks)),
-            "offset": offset,
-        })
+        page_size = min(50, limit - len(tracks))
+        data = sp.current_user_saved_tracks(limit=page_size, offset=offset)
         items = data.get("items", [])
         for item in items:
             t = (item or {}).get("track")
@@ -192,10 +141,11 @@ def find_spotify_match(source, title: str, artist: str,
     queries    = _build_queries(title, artist)
     seen       = set()
     candidates = []
+    sp         = _sp(source)
 
     for query in queries:
         try:
-            data    = _get(source, "/search", {"q": query, "type": "track", "limit": 10})
+            data    = sp.search(q=query, type="track", limit=10)
             results = (data.get("tracks") or {}).get("items", [])
         except Exception:
             continue
@@ -236,10 +186,9 @@ def find_spotify_match(source, title: str, artist: str,
         alternatives.sort(key=lambda x: x["confidence"], reverse=True)
         return best["id"], best.get("name", ""), round(best_score, 4), alternatives[:5]
 
-    # No confident match — also try a raw "title artist" query to widen search results
     raw_query = f"{title} {artist}".strip() if artist else title
     try:
-        raw_data    = _get(source, "/search", {"q": raw_query, "type": "track", "limit": 10})
+        raw_data    = sp.search(q=raw_query, type="track", limit=10)
         raw_results = (raw_data.get("tracks") or {}).get("items", [])
         for t in raw_results:
             if t and t.get("id") and t["id"] not in seen and t["id"] not in exclude:
@@ -267,25 +216,26 @@ def create_playlist(source, title: str) -> dict:
     """Create a new Spotify playlist. Returns {id, name}."""
     config          = source.config or {}
     spotify_user_id = config.get("spotify_user_id", "me")
-    data = _post(
-        source,
-        f"/users/{spotify_user_id}/playlists",
-        {"name": title, "public": True},
-    )
+    sp              = _sp(source)
+    data = sp.user_playlist_create(spotify_user_id, title, public=True)
     return {"id": data["id"], "name": data.get("name", title)}
 
 
 def get_playlist_track_ids(source, playlist_id: str) -> set:
     """Return the set of bare Spotify track IDs currently in a playlist."""
-    ids    = set()
+    sp   = _sp(source)
+    ids  = set()
     offset = 0
+    limit  = 100
 
     while True:
-        data  = _get(source, f"/playlists/{playlist_id}/tracks", {
-            "fields": "items(track(id)),next",
-            "limit":  100,
-            "offset": offset,
-        })
+        data = sp.playlist_items(
+            playlist_id,
+            limit=limit,
+            offset=offset,
+            fields="items(track(id)),next",
+            additional_types=("track",),
+        )
         items = data.get("items", [])
         for item in items:
             t = (item or {}).get("track")
@@ -301,9 +251,7 @@ def get_playlist_track_ids(source, playlist_id: str) -> set:
 def add_tracks_to_playlist(source, playlist_id: str, track_ids: list) -> bool:
     """Append track_ids (bare Spotify IDs) to a Spotify playlist.
 
-    Unlike SoundCloud, Spotify's POST endpoint adds tracks without replacing
-    the full list, so we only need to fetch existing IDs to deduplicate.
-    Spotify allows max 100 URIs per request — batches automatically.
+    Deduplicates against existing tracks; batches in chunks of 100.
     Returns True on success.
     """
     try:
@@ -311,10 +259,27 @@ def add_tracks_to_playlist(source, playlist_id: str, track_ids: list) -> bool:
         new_ids  = [tid for tid in track_ids if tid not in existing]
         if not new_ids:
             return True
+        sp = _sp(source)
         for i in range(0, len(new_ids), 100):
             batch = new_ids[i:i + 100]
             uris  = [f"spotify:track:{tid}" for tid in batch]
-            _post(source, f"/playlists/{playlist_id}/tracks", {"uris": uris})
+            sp.playlist_add_items(playlist_id, uris)
+        return True
+    except Exception:
+        return False
+
+
+def remove_tracks_from_playlist(source, playlist_id: str, track_ids: list) -> bool:
+    """Remove track_ids (bare Spotify IDs) from a Spotify playlist.
+
+    Batches in chunks of 100. Returns True on success.
+    """
+    try:
+        sp = _sp(source)
+        for i in range(0, len(track_ids), 100):
+            batch = track_ids[i:i + 100]
+            uris = [f"spotify:track:{tid}" for tid in batch]
+            sp.playlist_remove_all_occurrences_of_items(playlist_id, uris)
         return True
     except Exception:
         return False

@@ -229,10 +229,42 @@ def add_video_to_playlist(source, playlist_id: str, video_id: str) -> bool:
         return True
     except Exception as e:
         err = str(e)
-        # Forbidden / insufficientPermissions → re-raise with clear message
         if "forbidden" in err.lower() or "insufficientPermissions" in err or "403" in err:
             raise ValueError(
                 "Insufficient YouTube permissions to add videos to playlists. "
+                "Reconnect your YouTube account."
+            ) from e
+        return False
+
+
+def remove_video_from_playlist(source, playlist_id: str, video_id: str) -> bool:
+    """Remove a video from a YouTube playlist by its videoId.
+
+    Finds the playlistItemId first (required by the API) then deletes it.
+    """
+    youtube = _build_youtube(source)
+    try:
+        page_token = None
+        while True:
+            resp = youtube.playlistItems().list(
+                part="id,contentDetails",
+                playlistId=playlist_id,
+                maxResults=50,
+                **({"pageToken": page_token} if page_token else {}),
+            ).execute()
+            for item in resp.get("items", []):
+                if item.get("contentDetails", {}).get("videoId") == video_id:
+                    youtube.playlistItems().delete(id=item["id"]).execute()
+                    return True
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return False
+    except Exception as e:
+        err = str(e)
+        if "forbidden" in err.lower() or "insufficientPermissions" in err or "403" in err:
+            raise ValueError(
+                "Insufficient YouTube permissions to remove videos from playlists. "
                 "Reconnect your YouTube account."
             ) from e
         return False

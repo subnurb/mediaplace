@@ -9,15 +9,16 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@popperjs/core": "^2.11.8",
     "@reduxjs/toolkit": "^2.3.0",
+    "admin-lte": "4.0.0-rc6",
     "axios": "^1.7.0",
+    "bootstrap": "^5.3.3",
+    "bootstrap-icons": "^1.11.3",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "react-redux": "^9.1.0",
-    "admin-lte": "4.0.0-rc6",
-    "bootstrap": "^5.3.3",
-    "@popperjs/core": "^2.11.8",
-    "bootstrap-icons": "^1.11.3"
+    "react-router-dom": "^7.13.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.0",

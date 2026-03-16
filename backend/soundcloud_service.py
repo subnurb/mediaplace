@@ -349,3 +349,25 @@ def add_tracks_to_playlist(source, playlist_id: str, track_ids: list) -> bool:
         return resp.status_code in (200, 204)
     except Exception:
         return False
+
+
+def remove_tracks_from_playlist(source, playlist_id: str, track_ids: list) -> bool:
+    """Remove track_ids from a SoundCloud playlist.
+
+    SoundCloud requires replacing the full track list via PUT with the
+    remaining tracks.
+    """
+    try:
+        remove_set = set(str(tid) for tid in track_ids)
+        existing_data = _get(source, f"/playlists/{playlist_id}", {"limit": 200})
+        current_ids = [str(t["id"]) for t in existing_data.get("tracks", []) if t and t.get("id")]
+        updated = [tid for tid in current_ids if tid not in remove_set]
+        resp = http.put(
+            f"{_BASE}/playlists/{playlist_id}",
+            headers=_headers(source),
+            json={"playlist": {"tracks": [{"id": tid} for tid in updated]}},
+            timeout=_TIMEOUT,
+        )
+        return resp.status_code in (200, 204)
+    except Exception:
+        return False

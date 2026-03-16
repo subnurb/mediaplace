@@ -1,8 +1,10 @@
-import React from 'react'
+import React, { useState, useCallback, useEffect } from 'react'
 import { useSelector, useDispatch } from 'react-redux'
-import { logoutUser } from '../store/authSlice'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { logoutUser, clearUser } from '../store/authSlice'
+import api from '../api/client'
 import { connectYouTube, connectSoundCloud, connectSpotify, deleteSource } from '../store/sourcesSlice'
-import { setActiveTool, clearNotification } from '../store/uiSlice'
+import { clearNotification } from '../store/uiSlice'
 
 const SOURCE_LABELS = {
   youtube_publish: 'YouTube',
@@ -22,14 +24,14 @@ const SOURCE_ICONS = {
   ftp: 'bi-server text-secondary',
 }
 
-const PAGE_TITLES = {
-  dashboard:           { icon: 'bi-youtube text-danger',           label: 'MP3 to YouTube Publisher' },
-  sync:                { icon: 'bi-arrow-left-right text-primary', label: 'Sync Playlists'           },
-  'sync-log':          { icon: 'bi-clock-history text-primary',    label: 'Sync History'             },
-  library:             { icon: 'bi-music-note-list text-success',  label: 'Library'                  },
-  'library-settings':  { icon: 'bi-gear text-secondary',           label: 'Library Settings'         },
-  profile:             { icon: 'bi-person-circle text-secondary',  label: 'My Profile'               },
-}
+const ROUTE_TITLES = [
+  { path: '/',                  icon: 'bi-youtube text-danger',           label: 'MP3 to YouTube Publisher' },
+  { path: '/sync',              icon: 'bi-arrow-left-right text-primary', label: 'Sync Playlists'           },
+  { path: '/sync/log',          icon: 'bi-clock-history text-primary',    label: 'Sync History'             },
+  { path: '/library',           icon: 'bi-music-note-list text-success',  label: 'Library'                  },
+  { path: '/library/settings',  icon: 'bi-gear text-secondary',           label: 'Library Settings'         },
+  { path: '/profile',           icon: 'bi-person-circle text-secondary',  label: 'My Profile'               },
+]
 
 const PLATFORM_META = {
   youtube:    { label: 'YouTube',    icon: 'bi-youtube',             alertClass: 'alert-danger'  },
@@ -67,17 +69,68 @@ function OAuthNotification({ notification, onDismiss }) {
   )
 }
 
+function SidebarNavItem({ to, icon, label, end, onClick }) {
+  return (
+    <li className="nav-item">
+      <NavLink
+        to={to}
+        end={end}
+        onClick={onClick}
+        className={({ isActive }) =>
+          `nav-link w-100 text-start border-0 bg-transparent ${isActive ? 'active' : ''}`
+        }
+      >
+        <i className={`nav-icon bi ${icon}`}></i>
+        <p>{label}</p>
+      </NavLink>
+    </li>
+  )
+}
+
 export default function Layout({ children }) {
   const dispatch = useDispatch()
+  const navigate = useNavigate()
+  const location = useLocation()
   const { user } = useSelector((s) => s.auth)
   const { items: sources, error: sourcesError } = useSelector((s) => s.sources)
-  const { activeTool, notification } = useSelector((s) => s.ui)
+  const { notification } = useSelector((s) => s.ui)
+
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarOpen((prev) => !prev)
+  }, [])
+
+  useEffect(() => {
+    setSidebarOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    document.body.classList.toggle('sidebar-open', sidebarOpen)
+    return () => document.body.classList.remove('sidebar-open')
+  }, [sidebarOpen])
 
   const youtubeSources = sources.filter((s) => s.source_type === 'youtube_publish')
   const soundcloudSources = sources.filter((s) => s.source_type === 'soundcloud')
   const spotifySources = sources.filter((s) => s.source_type === 'spotify')
 
-  const pageTitle = PAGE_TITLES[activeTool] || PAGE_TITLES.dashboard
+  const currentRoute = ROUTE_TITLES.find((r) => {
+    if (r.path === '/') return location.pathname === '/'
+    return location.pathname.startsWith(r.path)
+  }) || ROUTE_TITLES[0]
+
+  const handleDeleteAccountConfirm = async () => {
+    try {
+      await api.post('/auth/delete-account/')
+      setShowDeleteModal(false)
+      dispatch(clearUser())
+      navigate('/')
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || 'Account deletion failed'
+      window.alert(msg)
+    }
+  }
 
   return (
     <div className="app-wrapper">
@@ -85,13 +138,20 @@ export default function Layout({ children }) {
       {/* ── Top Navbar ── */}
       <nav className="app-header navbar navbar-expand bg-body">
         <div className="container-fluid">
-          <a className="navbar-brand" href="/">
+          <button
+            className="btn btn-sm btn-light border d-lg-none me-2"
+            onClick={toggleSidebar}
+            aria-label="Toggle sidebar"
+          >
+            <i className="bi bi-list fs-5"></i>
+          </button>
+
+          <NavLink className="navbar-brand" to="/">
             <i className="bi bi-play-circle-fill text-danger me-2"></i>
             <span className="fw-bold">MediaPlace</span>
-          </a>
+          </NavLink>
 
           <div className="ms-auto d-flex align-items-center gap-3">
-            {/* User menu */}
             <div className="dropdown">
               <button
                 className="btn btn-sm btn-light d-flex align-items-center gap-2 border"
@@ -111,7 +171,7 @@ export default function Layout({ children }) {
                 <li>
                   <button
                     className="dropdown-item"
-                    onClick={() => dispatch(setActiveTool('profile'))}
+                    onClick={() => navigate('/profile')}
                   >
                     <i className="bi bi-person-circle me-2"></i>My Profile
                   </button>
@@ -125,6 +185,14 @@ export default function Layout({ children }) {
                     <i className="bi bi-box-arrow-right me-2"></i>Sign out
                   </button>
                 </li>
+                <li>
+                  <button
+                    className="dropdown-item text-danger"
+                    onClick={() => setShowDeleteModal(true)}
+                  >
+                    <i className="bi bi-trash me-2"></i>Delete account…
+                  </button>
+                </li>
               </ul>
             </div>
           </div>
@@ -134,63 +202,23 @@ export default function Layout({ children }) {
       {/* ── Sidebar ── */}
       <aside className="app-sidebar bg-body-secondary shadow">
         <div className="sidebar-brand">
-          <a href="/" className="brand-link px-3 py-3 d-flex align-items-center gap-2">
+          <NavLink to="/" className="brand-link px-3 py-3 d-flex align-items-center gap-2">
             <i className="bi bi-music-note-beamed fs-4 text-danger"></i>
             <span className="brand-text fw-bold">MP3 → YouTube</span>
-          </a>
+          </NavLink>
         </div>
 
         <div className="sidebar-wrapper">
           <nav className="mt-2">
             <ul className="nav sidebar-menu flex-column" data-lte-toggle="treeview">
 
-              {/* Main */}
               <li className="nav-header text-uppercase small px-3 pb-1">Tools</li>
-              <li className="nav-item">
-                <button
-                  className={`nav-link w-100 text-start border-0 bg-transparent ${activeTool === 'dashboard' ? 'active' : ''}`}
-                  onClick={() => dispatch(setActiveTool('dashboard'))}
-                >
-                  <i className="nav-icon bi bi-youtube"></i>
-                  <p>MP3 → YouTube</p>
-                </button>
-              </li>
-              <li className="nav-item">
-                <button
-                  className={`nav-link w-100 text-start border-0 bg-transparent ${activeTool === 'sync' ? 'active' : ''}`}
-                  onClick={() => dispatch(setActiveTool('sync'))}
-                >
-                  <i className="nav-icon bi bi-arrow-left-right"></i>
-                  <p>Sync Playlists</p>
-                </button>
-              </li>
-              <li className="nav-item">
-                <button
-                  className={`nav-link w-100 text-start border-0 bg-transparent ${activeTool === 'sync-log' ? 'active' : ''}`}
-                  onClick={() => dispatch(setActiveTool('sync-log'))}
-                >
-                  <i className="nav-icon bi bi-clock-history"></i>
-                  <p>Sync History</p>
-                </button>
-              </li>
-              <li className="nav-item">
-                <button
-                  className={`nav-link w-100 text-start border-0 bg-transparent ${activeTool === 'library' ? 'active' : ''}`}
-                  onClick={() => dispatch(setActiveTool('library'))}
-                >
-                  <i className="nav-icon bi bi-music-note-list"></i>
-                  <p>Library</p>
-                </button>
-              </li>
-              <li className="nav-item">
-                <button
-                  className={`nav-link w-100 text-start border-0 bg-transparent ${activeTool === 'library-settings' ? 'active' : ''}`}
-                  onClick={() => dispatch(setActiveTool('library-settings'))}
-                >
-                  <i className="nav-icon bi bi-gear"></i>
-                  <p>Library Settings</p>
-                </button>
-              </li>
+
+              <SidebarNavItem to="/" icon="bi-youtube" label="MP3 → YouTube" end />
+              <SidebarNavItem to="/sync" icon="bi-arrow-left-right" label="Sync Playlists" end />
+              <SidebarNavItem to="/sync/log" icon="bi-clock-history" label="Sync History" end />
+              <SidebarNavItem to="/library" icon="bi-music-note-list" label="Library" end />
+              <SidebarNavItem to="/library/settings" icon="bi-gear" label="Library Settings" end />
 
               {/* Sources */}
               <li className="nav-header text-uppercase small px-3 pb-1 mt-2">Sources</li>
@@ -201,7 +229,6 @@ export default function Layout({ children }) {
                 </li>
               )}
 
-              {/* Connected YouTube channels */}
               {youtubeSources.map((source) => (
                 <li key={source.id} className="nav-item">
                   <div className="nav-link d-flex align-items-center justify-content-between py-1">
@@ -220,7 +247,6 @@ export default function Layout({ children }) {
                 </li>
               ))}
 
-              {/* Connect YouTube button */}
               <li className="nav-item px-3 py-1">
                 <button
                   className="btn btn-sm btn-outline-danger w-100 d-flex align-items-center gap-2 justify-content-center"
@@ -231,7 +257,6 @@ export default function Layout({ children }) {
                 </button>
               </li>
 
-              {/* Connected SoundCloud accounts */}
               {soundcloudSources.map((source) => (
                 <li key={source.id} className="nav-item">
                   <div className="nav-link d-flex align-items-center justify-content-between py-1">
@@ -250,7 +275,6 @@ export default function Layout({ children }) {
                 </li>
               ))}
 
-              {/* Connect SoundCloud button */}
               <li className="nav-item px-3 py-1">
                 <button
                   className="btn btn-sm btn-outline-warning w-100 d-flex align-items-center gap-2 justify-content-center"
@@ -261,7 +285,6 @@ export default function Layout({ children }) {
                 </button>
               </li>
 
-              {/* Connected Spotify accounts */}
               {spotifySources.map((source) => (
                 <li key={source.id} className="nav-item">
                   <div className="nav-link d-flex align-items-center justify-content-between py-1">
@@ -280,7 +303,6 @@ export default function Layout({ children }) {
                 </li>
               ))}
 
-              {/* Connect Spotify button */}
               <li className="nav-item px-3 py-1">
                 <button
                   className="btn btn-sm btn-outline-success w-100 d-flex align-items-center gap-2 justify-content-center"
@@ -291,7 +313,6 @@ export default function Layout({ children }) {
                 </button>
               </li>
 
-              {/* Placeholder rows for future source types */}
               {[
                 { type: 'deezer', label: 'Deezer' },
               ].map(({ type, label }) => (
@@ -307,7 +328,6 @@ export default function Layout({ children }) {
             </ul>
           </nav>
 
-          {/* Sidebar footer */}
           <div className="mt-auto p-3 border-top small text-muted">
             <i className="bi bi-person-circle me-1"></i>
             <span>{user?.username}</span>
@@ -315,13 +335,73 @@ export default function Layout({ children }) {
         </div>
       </aside>
 
+      {sidebarOpen && (
+        <div
+          className="d-lg-none"
+          onClick={() => setSidebarOpen(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            zIndex: 1037,
+          }}
+        />
+      )}
+
+      {/* Delete account confirmation modal */}
+      {showDeleteModal && (
+        <div
+          className="modal fade show"
+          style={{ display: 'block', backgroundColor: 'rgba(0,0,0,0.5)' }}
+          tabIndex="-1"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="modal-dialog modal-dialog-centered" role="document">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h5 className="modal-title text-danger">Delete account</h5>
+                <button
+                  type="button"
+                  className="btn-close"
+                  aria-label="Close"
+                  onClick={() => setShowDeleteModal(false)}
+                />
+              </div>
+              <div className="modal-body">
+                <p className="mb-0">
+                  This will permanently delete your MediaPlace account and all associated data.
+                  This action cannot be undone.
+                </p>
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setShowDeleteModal(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  onClick={handleDeleteAccountConfirm}
+                >
+                  Yes, delete my account
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Main Content ── */}
       <main className="app-main">
         <div className="app-content-header py-3 px-4 border-bottom">
           <div className="container-fluid px-0">
             <h2 className="page-title h5 mb-0 fw-semibold">
-              <i className={`bi ${pageTitle.icon} me-2`}></i>
-              {pageTitle.label}
+              <i className={`bi ${currentRoute.icon} me-2`}></i>
+              {currentRoute.label}
             </h2>
           </div>
         </div>

@@ -686,7 +686,7 @@ function JobProgress({ job }) {
 export default function SyncPage() {
   const dispatch = useDispatch()
   const { items: sources } = useSelector((s) => s.sources)
-  const { playlists, playlistsLoading, job, jobLoading, pushLoading, error } = useSelector((s) => s.sync)
+  const { playlists, playlistsLoading, playlistsLoadingById, job, jobLoading, pushLoading, error } = useSelector((s) => s.sync)
 
   const [fromId, setFromId] = useState(null)
   const [toId, setToId]     = useState(null)
@@ -737,6 +737,7 @@ export default function SyncPage() {
     setSelectedPlaylist(null)
   }
 
+  const fromLoading = fromId ? (playlistsLoadingById?.[fromId] ?? !(fromId in playlists)) : false
   const currentPlaylists = fromId ? (playlists[fromId] || []) : []
   const targetPlaylists  = toId   ? (playlists[toId]   || []) : []
   const jobBadge = job ? (JOB_STATUS_BADGE[job.status] || JOB_STATUS_BADGE.pending) : null
@@ -814,7 +815,7 @@ export default function SyncPage() {
         </div>
 
         {/* ── Playlist Browser ── */}
-        {fromId && toId && !job && (
+        {fromId && !job && (
           <div className="card shadow-sm mb-3">
             <div className="card-header fw-semibold">
               <i className="bi bi-collection-play me-2 text-warning"></i>
@@ -832,8 +833,9 @@ export default function SyncPage() {
                 </span>
                 <button
                   className="btn btn-danger btn-sm"
-                  disabled={jobLoading}
+                  disabled={jobLoading || !toId}
                   onClick={handleStartSync}
+                  title={!toId ? 'Select a destination account first' : ''}
                 >
                   {jobLoading
                     ? <><span className="spinner-border spinner-border-sm me-1" />Starting…</>
@@ -846,7 +848,7 @@ export default function SyncPage() {
             <div className="card-body p-0">
               <PlaylistBrowser
                 playlists={currentPlaylists}
-                loading={playlistsLoading}
+                loading={fromLoading}
                 onSelect={handleSelectPlaylist}
               />
             </div>
@@ -887,6 +889,12 @@ export default function SyncPage() {
             </div>
 
             <div className="card-body pb-0">
+              {job.status === 'failed' && job.error_message && (
+                <div className="alert alert-danger mb-3" role="alert">
+                  <i className="bi bi-exclamation-triangle me-2"></i>
+                  {job.error_message}
+                </div>
+              )}
               <JobProgress job={job} />
               {unconfirmedMatchCount > 0 && (
                 <div className="d-flex justify-content-end mb-2">
