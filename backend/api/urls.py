@@ -2,10 +2,14 @@ from django.urls import path
 from . import views, sync_views, library_views
 
 urlpatterns = [
+    # Auth config (public)
+    path("auth/config/", views.auth_config),
+
     # App authentication
     path("auth/register/", views.app_register),
     path("auth/login/", views.app_login),
     path("auth/logout/", views.app_logout),
+    path("auth/delete-account/", views.delete_account),
     path("auth/me/", views.me),
     path("auth/profile/", views.update_profile),
     path("auth/change-password/", views.change_password),
@@ -61,4 +65,5 @@ urlpatterns = [
     path("library/settings/<int:playlist_id>/sync/", library_views.library_settings_sync),
     path("library/settings/<int:playlist_id>/stop/", library_views.library_settings_stop),
     path("library/analyze-all/", library_views.library_analyze_all),
+
 ]

@@ -12,11 +12,13 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "corsheaders",
+    # sslserver omitted: we use api.management.commands.runsslserver (Python 3.12+ compatible)
     "api",
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "config.middleware.HTTPSRedirectMiddleware",  # HTTP → HTTPS redirect when USE_HTTPS_DEV_REDIRECT
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -47,8 +49,17 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
     "https://localhost:5173",
+    "https://localhost:8000",
+    "https://localhost:8443",
 ]
 CORS_ALLOW_CREDENTIALS = True
+
+# HTTPS in development (django-sslserver)
+# Run: python manage.py runsslserver [port]  (default 8000)
+# Optional HTTP→HTTPS redirect: set USE_HTTPS_DEV_REDIRECT = True and run
+#   runsslserver 8443  (HTTPS) and  runserver 8000  (HTTP redirects to 8443)
+USE_HTTPS_DEV_REDIRECT = False  # set True in settings_private when using two processes
+HTTPS_DEV_PORT = int(os.environ.get("HTTPS_DEV_PORT", "8443"))
 
 # Media / upload directories
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -102,6 +113,10 @@ SHAZAM_ENABLED = True
 # Local (Dejavu-style) audio fingerprint — also runs in a daemon thread.
 # Disabled by default: librosa on large files can be slow.
 LOCAL_FINGERPRINT_ENABLED = True
+
+# Invitation code — set a non-empty string to require it on registration.
+# Leave empty or set to "" to allow open registration.
+INVITATION_CODE = ""
 
 # Load local private overrides — copy settings_private.example.py to
 # settings_private.py and fill in your values (file is gitignored)
