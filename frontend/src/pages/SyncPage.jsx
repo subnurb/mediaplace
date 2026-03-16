@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux'
 import {
   fetchPlaylists,
   createSyncJob,
+  createMultiSyncJob,
   analyzeSyncJob,
   pollSyncJob,
   uploadTrack,
@@ -16,6 +17,10 @@ import {
   pushToPlaylist,
   clearJob,
   clearError,
+  // Match-level actions for multi-destination jobs
+  confirmMatch,
+  rejectMatch,
+  selectMatchForDestination,
 } from '../store/syncSlice'
 
 // ── Source metadata ───────────────────────────────────────────────────────────
@@ -170,31 +175,31 @@ const TARGET_LINK_CONFIG = {
   },
 }
 
-function TargetLink({ track, targetType }) {
-  if (!track.target_title) {
-    return track.status === 'not_found'
+function TargetLink({ record, targetType }) {
+  if (!record.target_title) {
+    return record.status === 'not_found'
       ? <span className="text-muted fst-italic" style={{ fontSize: '0.78rem' }}>No match found</span>
       : null
   }
 
   const cfg = TARGET_LINK_CONFIG[targetType]
-  if (cfg && track.target_video_id) {
+  if (cfg && record.target_video_id) {
     return (
       <a
-        href={cfg.href(track.target_video_id)}
+        href={cfg.href(record.target_video_id)}
         target="_blank"
         rel="noreferrer"
         className="text-decoration-none text-truncate d-inline-block"
         style={{ maxWidth: 200 }}
-        title={track.target_title}
+        title={record.target_title}
       >
         <i className={`bi ${cfg.icon} ${cfg.color} me-1`}></i>
-        {track.target_title}
+        {record.target_title}
       </a>
     )
   }
 
-  return <span className="text-muted small text-truncate d-inline-block" style={{ maxWidth: 200 }}>{track.target_title}</span>
+  return <span className="text-muted small text-truncate d-inline-block" style={{ maxWidth: 200 }}>{record.target_title}</span>
 }
 
 function TrackRowInner({ track, jobId, sourceType, targetType, dispatch }) {
@@ -272,7 +277,7 @@ function TrackRowInner({ track, jobId, sourceType, targetType, dispatch }) {
         {track.match_confidence != null && confBadge(track.match_confidence)}
       </td>
       <td className="align-middle small" style={{ maxWidth: 200 }}>
-        <TargetLink track={track} targetType={targetType} />
+        <TargetLink record={track} targetType={targetType} />
         {track.has_alternatives && track.status !== 'not_found' && !confirmed && (
           <div className="text-muted" style={{ fontSize: '0.68rem' }}>
             <i className="bi bi-collection me-1"></i>alternatives available
@@ -502,149 +507,450 @@ function TrackRow({ track, jobId, sourceType, targetType, dispatch }) {
   )
 }
 
+function DestinationMatchCell({ match, destination, jobId, dispatch }) {
+  const [busy, setBusy] = React.useState(false)
+
+  if (!match) {
+    return (
+      <td className="align-middle text-muted small">
+        <span className="fst-italic">No analysis yet</span>
+      </td>
+    )
+  }
+
+  const badge = TRACK_BADGE[match.status] || TRACK_BADGE.pending
+  const canValidate =
+    !!match.target_video_id &&
+    ['matched', 'uncertain', 'uploaded'].includes(match.status)
+  const confirmed = match.user_feedback === 'confirmed'
+
+  async function handleConfirm() {
+    setBusy(true)
+    await dispatch(confirmMatch({ jobId, matchId: match.id }))
+    setBusy(false)
+  }
+
+  async function handleReject() {
+    setBusy(true)
+    await dispatch(rejectMatch({ jobId, matchId: match.id }))
+    setBusy(false)
+  }
+
+  return (
+    <td className="align-middle small" style={{ minWidth: 180 }}>
+      <div className="d-flex flex-column gap-1">
+        <div className="d-flex align-items-center justify-content-between gap-2">
+          <span className={`badge rounded-pill ${badge.cls}`} style={{ fontSize: '0.72rem' }}>
+            {badge.label}
+          </span>
+          {match.match_confidence != null && confBadge(match.match_confidence)}
+        </div>
+        <div>
+          <TargetLink record={match} targetType={destination.source.source_type} />
+          {match.error && (
+            <div className="text-danger mt-1" style={{ fontSize: '0.7rem' }}>
+              <i className="bi bi-exclamation-circle me-1"></i>
+              {match.error.slice(0, 60)}
+            </div>
+          )}
+        </div>
+        <div className="d-flex justify-content-end gap-1">
+          {busy ? (
+            <span className="spinner-border spinner-border-sm text-primary" />
+          ) : (
+            <>
+              {canValidate && !confirmed && (
+                <>
+                  <button
+                    className="btn btn-sm btn-success"
+                    style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                    title="Confirm this match for this destination"
+                    onClick={handleConfirm}
+                  >
+                    <i className="bi bi-check-lg me-1"></i>Confirm
+                  </button>
+                  {match.has_alternatives && (
+                    <button
+                      className="btn btn-sm btn-outline-danger"
+                      style={{ fontSize: '0.72rem', padding: '2px 6px' }}
+                      title="Not the right track — try next alternative"
+                      onClick={handleReject}
+                    >
+                      <i className="bi bi-x-lg"></i>
+                    </button>
+                  )}
+                </>
+              )}
+              {confirmed && (
+                <span className="badge rounded-pill bg-success-subtle text-success border border-success-subtle" style={{ fontSize: '0.68rem' }}>
+                  <i className="bi bi-hand-thumbs-up-fill me-1"></i>Confirmed
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </td>
+  )
+}
+
+function MultiDestinationTrackRow({ track, jobId, sourceType, destinations, dispatch }) {
+  return (
+    <tr>
+      <td className="align-middle" style={{ width: 40 }}>
+        {track.source_artwork_url
+          ? <img src={track.source_artwork_url} alt="" width={36} height={36} className="rounded" style={{ objectFit: 'cover' }} />
+          : (
+            <div className="bg-secondary-subtle rounded d-flex align-items-center justify-content-center" style={{ width: 36, height: 36 }}>
+              <i className="bi bi-music-note text-secondary"></i>
+            </div>
+          )
+        }
+      </td>
+      <td className="align-middle">
+        {track.source_permalink_url ? (
+          <a
+            href={track.source_permalink_url}
+            target="_blank"
+            rel="noreferrer"
+            className="fw-semibold small text-truncate d-block text-decoration-none text-body"
+            style={{ maxWidth: 220 }}
+            title={track.source_title}
+          >
+            {sourceType && (() => {
+              const m = sourceMeta(sourceType)
+              return <i className={`bi ${m.icon} ${m.color} me-1`}></i>
+            })()}
+            {track.source_title}
+          </a>
+        ) : (
+          <div className="fw-semibold small text-truncate" style={{ maxWidth: 220 }}>{track.source_title}</div>
+        )}
+        <div className="text-muted" style={{ fontSize: '0.78rem' }}>{track.source_artist}</div>
+      </td>
+      <td className="align-middle text-muted small">
+        {fmtDuration(track.source_duration_ms)}
+      </td>
+      {destinations.map((dest) => {
+        const match = (track.destination_matches || []).find(
+          (m) => m.destination_id === dest.id,
+        )
+        return (
+          <DestinationMatchCell
+            key={dest.id}
+            match={match}
+            destination={dest}
+            jobId={jobId}
+            dispatch={dispatch}
+          />
+        )
+      })}
+    </tr>
+  )
+}
+
 function PushToPlaylist({ job, targetPlaylists, targetPlaylistsLoading, dispatch }) {
-  const [mode, setMode] = useState('existing')  // 'existing' | 'new'
-  const [selectedId, setSelectedId] = useState('')
-  const [newName, setNewName] = useState('')
   const { pushLoading } = useSelector((s) => s.sync)
 
   const tracks = job.tracks || []
-  const eligibleTracks = tracks.filter(
-    (t) =>
-      t.target_video_id &&
-      (
-        t.status === 'matched' ||
-        t.status === 'uploaded' ||
-        (t.status === 'uncertain' && t.user_feedback === 'confirmed')
-      )
+  const syncPlaylists = job.sync_playlists || []
+  const destinationPlaylists = syncPlaylists.filter(
+    (sp) => sp.role === 'destination' || sp.role === 'both',
   )
 
-  const pushedCount = tracks.filter((t) => t.pushed_to_playlist).length
+  const [configs, setConfigs] = useState(() =>
+    destinationPlaylists.map((dest) => ({
+      destinationId: dest.id,
+      mode: 'existing',      // 'existing' | 'new'
+      selectedId: '',
+      newName: dest.playlist_name || '',
+    })),
+  )
 
-  function handlePush() {
-    const payload = {
-      jobId: job.id,
-      targetPlaylistId: mode === 'existing' ? selectedId : null,
-      newPlaylistName: mode === 'new' ? newName.trim() : '',
-    }
-    dispatch(pushToPlaylist(payload))
+  function updateConfig(destinationId, patch) {
+    setConfigs((prev) =>
+      prev.map((c) =>
+        c.destinationId === destinationId ? { ...c, ...patch } : c,
+      ),
+    )
   }
 
-  const canPush =
-    mode === 'existing'
-      ? !!selectedId
-      : newName.trim().length > 0
+  function eligibleForDestination(dest) {
+    const destMatchesByTrack = {}
+    for (const t of tracks) {
+      const m = (t.destination_matches || []).find((x) => x.destination_id === dest.id)
+      if (m) destMatchesByTrack[t.id] = m
+    }
+    const matches = Object.values(destMatchesByTrack)
+    return matches.filter(
+      (m) =>
+        m.target_video_id &&
+        (
+          m.status === 'matched' ||
+          m.status === 'uploaded' ||
+          (m.status === 'uncertain' && m.user_feedback === 'confirmed')
+        ),
+    )
+  }
 
-  // Success state — job already pushed
-  if (job.pushed_at && job.target_playlist_name) {
-    const pushedDate = new Date(job.pushed_at).toLocaleDateString()
+  // Legacy jobs fallback: no sync_playlists → show original single-destination panel
+  if (!destinationPlaylists.length) {
+    const [mode, setMode] = useState('existing')
+    const [selectedId, setSelectedId] = useState('')
+    const [newName, setNewName] = useState('')
+
+    const eligibleTracks = tracks.filter(
+      (t) =>
+        t.target_video_id &&
+        (
+          t.status === 'matched' ||
+          t.status === 'uploaded' ||
+          (t.status === 'uncertain' && t.user_feedback === 'confirmed')
+        ),
+    )
+    const pushedCount = tracks.filter((t) => t.pushed_to_playlist).length
+
+    function handleLegacyPush() {
+      const payload = {
+        jobId: job.id,
+        targetPlaylistId: mode === 'existing' ? selectedId : null,
+        newPlaylistName: mode === 'new' ? newName.trim() : '',
+      }
+      dispatch(pushToPlaylist(payload))
+    }
+
+    const canPushLegacy =
+      mode === 'existing'
+        ? !!selectedId
+        : newName.trim().length > 0
+
+    if (job.pushed_at && job.target_playlist_name) {
+      const pushedDate = new Date(job.pushed_at).toLocaleDateString()
+      return (
+        <div className="card-body pt-0">
+          <div className="alert alert-success mb-0 py-2 d-flex align-items-center gap-2">
+            <i className="bi bi-check-circle-fill fs-5"></i>
+            <div>
+              <span className="fw-semibold">Pushed to "{job.target_playlist_name}"</span>
+              <span className="text-muted ms-2 small">on {pushedDate}</span>
+              {pushedCount > 0 && (
+                <span className="ms-2 small">· {pushedCount} track{pushedCount !== 1 ? 's' : ''} added</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )
+    }
+
     return (
-      <div className="card-body pt-0">
-        <div className="alert alert-success mb-0 py-2 d-flex align-items-center gap-2">
-          <i className="bi bi-check-circle-fill fs-5"></i>
-          <div>
-            <span className="fw-semibold">Pushed to "{job.target_playlist_name}"</span>
-            <span className="text-muted ms-2 small">on {pushedDate}</span>
-            {pushedCount > 0 && (
-              <span className="ms-2 small">· {pushedCount} track{pushedCount !== 1 ? 's' : ''} added</span>
+      <div className="card-body border-top pt-3">
+        <h6 className="fw-semibold mb-3">
+          <i className="bi bi-send me-2 text-primary"></i>Push to Playlist
+        </h6>
+        {/* Legacy single-destination controls */}
+        <div className="d-flex gap-3 mb-3">
+          <div className="form-check">
+            <input
+              className="form-check-input"
+              type="radio"
+              id="legacyModeExisting"
+              checked={mode === 'existing'}
+              onChange={() => setMode('existing')}
+            />
+            <label className="form-check-label small" htmlFor="legacyModeExisting">
+              Add to existing playlist
+            </label>
+          </div>
+          <div className="form-check">
+            <input
+              className="form-check-input"
+              type="radio"
+              id="legacyModeNew"
+              checked={mode === 'new'}
+              onChange={() => setMode('new')}
+            />
+            <label className="form-check-label small" htmlFor="legacyModeNew">
+              Create new playlist
+            </label>
+          </div>
+        </div>
+
+        {mode === 'existing' && (
+          <div className="mb-3" style={{ maxHeight: 220, overflowY: 'auto', border: '1px solid var(--bs-border-color)', borderRadius: 6 }}>
+            {targetPlaylistsLoading ? (
+              <div className="text-center py-3 text-muted small">
+                <span className="spinner-border spinner-border-sm me-2" />Loading playlists…
+              </div>
+            ) : targetPlaylists.length === 0 ? (
+              <p className="text-muted small text-center py-3 mb-0">No playlists found.</p>
+            ) : (
+              <div className="list-group list-group-flush">
+                {targetPlaylists.map((pl) => (
+                  <button
+                    key={pl.id}
+                    className={`list-group-item list-group-item-action d-flex justify-content-between align-items-center py-2 ${selectedId === pl.id ? 'active' : ''}`}
+                    onClick={() => setSelectedId(pl.id)}
+                  >
+                    <span className="small">{pl.name}</span>
+                    <span className="badge bg-secondary-subtle text-secondary border rounded-pill" style={{ fontSize: '0.68rem' }}>
+                      {pl.track_count ?? '?'}
+                    </span>
+                  </button>
+                ))}
+              </div>
             )}
           </div>
+        )}
+
+        {mode === 'new' && (
+          <div className="mb-3">
+            <input
+              type="text"
+              className="form-control form-control-sm"
+              placeholder="New playlist name…"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+            />
+          </div>
+        )}
+
+        <div className="d-flex align-items-center justify-content-between">
+          <span className="small text-muted">
+            <i className="bi bi-music-note-list me-1"></i>
+            Will add <strong>{eligibleTracks.length}</strong> track{eligibleTracks.length !== 1 ? 's' : ''}
+            {tracks.filter((t) => t.status === 'skipped').length > 0 && (
+              <span className="ms-1">(skipping {tracks.filter((t) => t.status === 'skipped').length} skipped)</span>
+            )}
+          </span>
+          <button
+            className="btn btn-primary btn-sm"
+            disabled={!canPushLegacy || pushLoading || eligibleTracks.length === 0}
+            onClick={handleLegacyPush}
+          >
+            {pushLoading
+              ? <><span className="spinner-border spinner-border-sm me-1" />Adding tracks…</>
+              : <><i className="bi bi-send me-1"></i>Validate Sync</>
+            }
+          </button>
         </div>
       </div>
     )
   }
 
+  // Multi-destination UI
   return (
     <div className="card-body border-top pt-3">
       <h6 className="fw-semibold mb-3">
-        <i className="bi bi-send me-2 text-primary"></i>Push to Playlist
+        <i className="bi bi-send me-2 text-primary"></i>Push to Destinations
       </h6>
-
-      {/* Mode toggle */}
-      <div className="d-flex gap-3 mb-3">
-        <div className="form-check">
-          <input
-            className="form-check-input"
-            type="radio"
-            id="modeExisting"
-            checked={mode === 'existing'}
-            onChange={() => setMode('existing')}
-          />
-          <label className="form-check-label small" htmlFor="modeExisting">
-            Add to existing playlist
-          </label>
-        </div>
-        <div className="form-check">
-          <input
-            className="form-check-input"
-            type="radio"
-            id="modeNew"
-            checked={mode === 'new'}
-            onChange={() => setMode('new')}
-          />
-          <label className="form-check-label small" htmlFor="modeNew">
-            Create new playlist
-          </label>
-        </div>
-      </div>
-
-      {mode === 'existing' && (
-        <div className="mb-3" style={{ maxHeight: 220, overflowY: 'auto', border: '1px solid var(--bs-border-color)', borderRadius: 6 }}>
-          {targetPlaylistsLoading ? (
-            <div className="text-center py-3 text-muted small">
-              <span className="spinner-border spinner-border-sm me-2" />Loading playlists…
-            </div>
-          ) : targetPlaylists.length === 0 ? (
-            <p className="text-muted small text-center py-3 mb-0">No playlists found.</p>
-          ) : (
-            <div className="list-group list-group-flush">
-              {targetPlaylists.map((pl) => (
-                <button
-                  key={pl.id}
-                  className={`list-group-item list-group-item-action d-flex justify-content-between align-items-center py-2 ${selectedId === pl.id ? 'active' : ''}`}
-                  onClick={() => setSelectedId(pl.id)}
-                >
-                  <span className="small">{pl.name}</span>
-                  <span className="badge bg-secondary-subtle text-secondary border rounded-pill" style={{ fontSize: '0.68rem' }}>
-                    {pl.track_count ?? '?'}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {mode === 'new' && (
-        <div className="mb-3">
-          <input
-            type="text"
-            className="form-control form-control-sm"
-            placeholder="New playlist name…"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-          />
-        </div>
-      )}
-
-      <div className="d-flex align-items-center justify-content-between">
-        <span className="small text-muted">
-          <i className="bi bi-music-note-list me-1"></i>
-          Will add <strong>{eligibleTracks.length}</strong> track{eligibleTracks.length !== 1 ? 's' : ''}
-          {tracks.filter((t) => t.status === 'skipped').length > 0 && (
-            <span className="ms-1">(skipping {tracks.filter((t) => t.status === 'skipped').length} skipped)</span>
-          )}
-        </span>
-        <button
-          className="btn btn-primary btn-sm"
-          disabled={!canPush || pushLoading || eligibleTracks.length === 0}
-          onClick={handlePush}
-        >
-          {pushLoading
-            ? <><span className="spinner-border spinner-border-sm me-1" />Adding tracks…</>
-            : <><i className="bi bi-send me-1"></i>Validate Sync</>
+      <div className="row g-3">
+        {destinationPlaylists.map((dest) => {
+          const meta = sourceMeta(dest.source.source_type)
+          const cfg = configs.find((c) => c.destinationId === dest.id) || {
+            destinationId: dest.id,
+            mode: 'existing',
+            selectedId: '',
+            newName: dest.playlist_name || '',
           }
-        </button>
+          const eligible = eligibleForDestination(dest)
+
+          const canPush =
+            cfg.mode === 'existing'
+              ? !!cfg.selectedId
+              : cfg.newName.trim().length > 0
+
+          function handlePushOne() {
+            const payload = {
+              jobId: job.id,
+              destinationId: dest.id,
+              targetPlaylistId: cfg.mode === 'existing' ? cfg.selectedId : null,
+              newPlaylistName: cfg.mode === 'new' ? cfg.newName.trim() : '',
+            }
+            dispatch(pushToPlaylist(payload))
+          }
+
+          return (
+            <div key={dest.id} className="col-md-6">
+              <div className="border rounded p-2 h-100">
+                <div className="d-flex align-items-center justify-content-between mb-2">
+                  <div>
+                    <div className={`small fw-semibold ${meta.color}`}>
+                      <i className={`bi ${meta.icon} me-1`}></i>
+                      {dest.source.name}
+                    </div>
+                    {dest.playlist_name && (
+                      <div className="text-muted small text-truncate">
+                        {dest.playlist_name}
+                      </div>
+                    )}
+                  </div>
+                  <span className="badge bg-light text-muted border" style={{ fontSize: '0.7rem' }}>
+                    {eligible.length} ready track{eligible.length !== 1 ? 's' : ''}
+                  </span>
+                </div>
+
+                {/* Mode toggle */}
+                <div className="d-flex gap-3 mb-2">
+                  <div className="form-check">
+                    <input
+                      className="form-check-input"
+                      type="radio"
+                      id={`dest-${dest.id}-existing`}
+                      checked={cfg.mode === 'existing'}
+                      onChange={() => updateConfig(dest.id, { mode: 'existing' })}
+                    />
+                    <label className="form-check-label small" htmlFor={`dest-${dest.id}-existing`}>
+                      Existing playlist
+                    </label>
+                  </div>
+                  <div className="form-check">
+                    <input
+                      className="form-check-input"
+                      type="radio"
+                      id={`dest-${dest.id}-new`}
+                      checked={cfg.mode === 'new'}
+                      onChange={() => updateConfig(dest.id, { mode: 'new' })}
+                    />
+                    <label className="form-check-label small" htmlFor={`dest-${dest.id}-new`}>
+                      New playlist
+                    </label>
+                  </div>
+                </div>
+
+                {cfg.mode === 'new' && (
+                  <div className="mb-2">
+                    <input
+                      type="text"
+                      className="form-control form-control-sm"
+                      placeholder="New playlist name…"
+                      value={cfg.newName}
+                      onChange={(e) => updateConfig(dest.id, { newName: e.target.value })}
+                    />
+                  </div>
+                )}
+
+                {/* For now we don't have per-destination playlist browsing; keep it simple */}
+
+                <div className="d-flex align-items-center justify-content-between mt-2">
+                  <span className="small text-muted">
+                    <i className="bi bi-music-note-list me-1"></i>
+                    Will add <strong>{eligible.length}</strong> track{eligible.length !== 1 ? 's' : ''}
+                  </span>
+                  <button
+                    className="btn btn-primary btn-sm"
+                    disabled={!canPush || pushLoading || eligible.length === 0}
+                    onClick={handlePushOne}
+                  >
+                    {pushLoading
+                      ? <><span className="spinner-border spinner-border-sm me-1" />Pushing…</>
+                      : <><i className="bi bi-send me-1"></i>Push</>
+                    }
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
@@ -681,30 +987,112 @@ function JobProgress({ job }) {
   )
 }
 
+// ── Role configuration helpers ────────────────────────────────────────────────
+
+const ROLE_OPTIONS = [
+  { value: 'source',      label: 'Source',        icon: 'bi-box-arrow-right',   color: 'text-info',    desc: 'Tracks are read from here' },
+  { value: 'destination', label: 'Destination',   icon: 'bi-box-arrow-in-right', color: 'text-warning', desc: 'Tracks are synced to here' },
+  { value: 'both',        label: 'Bidirectional', icon: 'bi-arrow-left-right',  color: 'text-primary', desc: 'Sync in both directions' },
+]
+
+function RoleSelector({ role, onChange }) {
+  return (
+    <div className="btn-group btn-group-sm" role="group">
+      {ROLE_OPTIONS.map((opt) => (
+        <button
+          key={opt.value}
+          type="button"
+          className={`btn ${role === opt.value ? 'btn-primary' : 'btn-outline-secondary'}`}
+          onClick={() => onChange(opt.value)}
+          title={opt.desc}
+        >
+          <i className={`bi ${opt.icon} me-1`}></i>
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ── Step indicator ────────────────────────────────────────────────────────────
+
+function StepIndicator({ currentStep, onStepClick, selectedCount }) {
+  const steps = [
+    { num: 1, label: 'Select Playlists', icon: 'bi-collection-play', enabled: true },
+    { num: 2, label: 'Configure Roles',  icon: 'bi-sliders',         enabled: selectedCount > 0 },
+  ]
+
+  return (
+    <div className="d-flex align-items-center gap-2 mb-3">
+      {steps.map((step, idx) => (
+        <React.Fragment key={step.num}>
+          {idx > 0 && (
+            <div
+              className={`flex-grow-0 ${currentStep > step.num - 1 ? 'bg-primary' : 'bg-secondary-subtle'}`}
+              style={{ height: 2, width: 40 }}
+            />
+          )}
+          <button
+            type="button"
+            className={`btn btn-sm d-flex align-items-center gap-2 ${
+              currentStep === step.num
+                ? 'btn-primary'
+                : currentStep > step.num
+                  ? 'btn-outline-primary'
+                  : 'btn-outline-secondary'
+            }`}
+            disabled={!step.enabled}
+            onClick={() => step.enabled && onStepClick(step.num)}
+            style={{ minWidth: 160 }}
+          >
+            <span
+              className="d-inline-flex align-items-center justify-content-center rounded-circle"
+              style={{
+                width: 24,
+                height: 24,
+                fontSize: '0.75rem',
+                fontWeight: 700,
+                background: currentStep === step.num ? 'rgba(255,255,255,0.2)' : 'transparent',
+              }}
+            >
+              {currentStep > step.num
+                ? <i className="bi bi-check-lg"></i>
+                : step.num}
+            </span>
+            <span className="small fw-semibold">{step.label}</span>
+          </button>
+        </React.Fragment>
+      ))}
+    </div>
+  )
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function SyncPage() {
   const dispatch = useDispatch()
   const { items: sources } = useSelector((s) => s.sources)
-  const { playlists, playlistsLoading, playlistsLoadingById, job, jobLoading, pushLoading, error } = useSelector((s) => s.sync)
+  const {
+    playlists,
+    playlistsLoading,
+    playlistsLoadingById,
+    job,
+    jobLoading,
+    pushLoading,
+    error,
+  } = useSelector((s) => s.sync)
 
-  const [fromId, setFromId] = useState(null)
-  const [toId, setToId]     = useState(null)
-  const [selectedPlaylist, setSelectedPlaylist] = useState(null)
+  const [wizardStep, setWizardStep] = useState(1)        // 1 = select playlists, 2 = configure roles
+  const [browseAccountId, setBrowseAccountId] = useState(null)
+  // Each entry: { source_id, playlist_id, playlist_name, role: 'source'|'destination'|'both' }
+  const [selectedPlaylists, setSelectedPlaylists] = useState([])
 
   const pollRef = useRef(null)
 
-  // Load playlists when "from" source changes
   useEffect(() => {
-    if (fromId) dispatch(fetchPlaylists(fromId))
-  }, [fromId, dispatch])
+    if (browseAccountId) dispatch(fetchPlaylists(browseAccountId))
+  }, [browseAccountId, dispatch])
 
-  // Load target playlists when "to" source changes (needed for push panel)
-  useEffect(() => {
-    if (toId) dispatch(fetchPlaylists(toId))
-  }, [toId, dispatch])
-
-  // Poll while job is running
   useEffect(() => {
     if (job && POLLING_STATUSES.has(job.status)) {
       pollRef.current = setInterval(() => dispatch(pollSyncJob(job.id)), 3000)
@@ -714,19 +1102,61 @@ export default function SyncPage() {
     return () => clearInterval(pollRef.current)
   }, [job?.id, job?.status, dispatch])
 
-  function handleSelectPlaylist(pl) {
-    setSelectedPlaylist(pl)
+  function plKey(p) { return `${p.source_id}:${p.playlist_id}` }
+
+  function isSelected(sourceId, playlistId) {
+    return selectedPlaylists.some((p) => p.source_id === sourceId && p.playlist_id === playlistId)
+  }
+
+  function togglePlaylist(pl) {
+    if (!browseAccountId) return
+    setSelectedPlaylists((prev) => {
+      const key = `${browseAccountId}:${pl.id}`
+      const exists = prev.find((p) => plKey(p) === key)
+      if (exists) return prev.filter((p) => plKey(p) !== key)
+      return [...prev, {
+        source_id: browseAccountId,
+        playlist_id: pl.id,
+        playlist_name: pl.name,
+        role: 'source',
+      }]
+    })
     dispatch(clearJob())
   }
 
+  function removePlaylist(sourceId, playlistId) {
+    setSelectedPlaylists((prev) =>
+      prev.filter((p) => !(p.source_id === sourceId && p.playlist_id === playlistId)),
+    )
+  }
+
+  function setPlaylistRole(sourceId, playlistId, role) {
+    setSelectedPlaylists((prev) =>
+      prev.map((p) =>
+        p.source_id === sourceId && p.playlist_id === playlistId
+          ? { ...p, role }
+          : p,
+      ),
+    )
+  }
+
+  function setAllRoles(role) {
+    setSelectedPlaylists((prev) => prev.map((p) => ({ ...p, role })))
+  }
+
   async function handleStartSync() {
-    if (!fromId || !toId || !selectedPlaylist) return
-    const result = await dispatch(createSyncJob({
-      sourceFromId: fromId,
-      sourceToId: toId,
-      playlistId: selectedPlaylist.id,
-      playlistName: selectedPlaylist.name,
-    }))
+    if (!selectedPlaylists.length) return
+    const hasSrc = selectedPlaylists.some((p) => p.role === 'source' || p.role === 'both')
+    const hasDst = selectedPlaylists.some((p) => p.role === 'destination' || p.role === 'both')
+    if (!hasSrc || !hasDst) return
+
+    const result = await dispatch(
+      createMultiSyncJob({
+        playlists: selectedPlaylists.map(({ source_id, playlist_id, playlist_name, role }) => ({
+          source_id, playlist_id, playlist_name, role,
+        })),
+      }),
+    )
     if (result.meta.requestStatus === 'fulfilled') {
       dispatch(analyzeSyncJob(result.payload.id))
     }
@@ -734,28 +1164,41 @@ export default function SyncPage() {
 
   function handleReset() {
     dispatch(clearJob())
-    setSelectedPlaylist(null)
+    setSelectedPlaylists([])
+    setWizardStep(1)
   }
 
-  const fromLoading = fromId ? (playlistsLoadingById?.[fromId] ?? !(fromId in playlists)) : false
-  const currentPlaylists = fromId ? (playlists[fromId] || []) : []
-  const targetPlaylists  = toId   ? (playlists[toId]   || []) : []
+  const fromLoading = browseAccountId
+    ? playlistsLoadingById?.[browseAccountId] ?? !(browseAccountId in playlists)
+    : false
+  const currentPlaylists = browseAccountId ? playlists[browseAccountId] || [] : []
+  const targetPlaylists = []
   const jobBadge = job ? (JOB_STATUS_BADGE[job.status] || JOB_STATUS_BADGE.pending) : null
   const tracks = job?.tracks || []
-  const targetType = job?.source_to?.source_type || (toId ? sources.find((s) => s.id === toId)?.source_type : null)
+  const targetType = job?.source_to?.source_type || null
 
-  // Count tracks that can still be validated (have a match, not yet confirmed)
+  const syncPlaylists = job?.sync_playlists || []
+  const destinationPlaylists = syncPlaylists.filter(
+    (sp) => sp.role === 'destination' || sp.role === 'both',
+  )
+  const isMultiDestinationJob = destinationPlaylists.length > 0 && tracks.some(
+    (t) => Array.isArray(t.destination_matches) && t.destination_matches.length > 0,
+  )
+
   const unconfirmedMatchCount = tracks.filter(
     (t) => ['matched', 'uncertain'].includes(t.status) && t.target_video_id && t.user_feedback !== 'confirmed'
   ).length
 
-  // Column header for match results depends on target platform
   const targetMeta = targetType ? sourceMeta(targetType) : null
   const matchColHeader = targetMeta
     ? <><i className={`bi ${targetMeta.icon} ${targetMeta.color} me-1`}></i>Match on {targetMeta.label}</>
     : 'Match'
 
   const noSources = sources.length < 2
+
+  const srcCount = selectedPlaylists.filter((p) => p.role === 'source' || p.role === 'both').length
+  const dstCount = selectedPlaylists.filter((p) => p.role === 'destination' || p.role === 'both').length
+  const canStart = srcCount > 0 && dstCount > 0
 
   return (
     <div className="row justify-content-center mt-4">
@@ -775,7 +1218,7 @@ export default function SyncPage() {
           </div>
         )}
 
-        {/* ── Setup Card ── */}
+        {/* ── Setup Card (2-step wizard) ── */}
         <div className="card shadow-sm mb-3">
           <div className="card-header d-flex align-items-center justify-content-between">
             <span className="fw-semibold">
@@ -788,72 +1231,284 @@ export default function SyncPage() {
             )}
           </div>
           <div className="card-body">
-            <div className="row g-3 align-items-start">
-              <div className="col-md-5">
-                <SourceSelect
-                  label="From (source)"
-                  sources={sources}
-                  excludeId={toId}
-                  value={fromId}
-                  onChange={(id) => { setFromId(id); setSelectedPlaylist(null); dispatch(clearJob()) }}
-                />
-              </div>
-              <div className="col-md-2 text-center pt-4 mt-1">
-                <i className="bi bi-arrow-right fs-4 text-muted"></i>
-              </div>
-              <div className="col-md-5">
-                <SourceSelect
-                  label="To (destination)"
-                  sources={sources}
-                  excludeId={fromId}
-                  value={toId}
-                  onChange={(id) => setToId(id)}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
+            <StepIndicator
+              currentStep={wizardStep}
+              onStepClick={setWizardStep}
+              selectedCount={selectedPlaylists.length}
+            />
 
-        {/* ── Playlist Browser ── */}
-        {fromId && !job && (
-          <div className="card shadow-sm mb-3">
-            <div className="card-header fw-semibold">
-              <i className="bi bi-collection-play me-2 text-warning"></i>
-              Select a Playlist
-            </div>
+            {/* ── STEP 1: Select Playlists ── */}
+            {wizardStep === 1 && (
+              <div>
+                <div className="row g-3 align-items-start">
+                  {/* Account selector */}
+                  <div className="col-md-4">
+                    <label className="form-label small fw-semibold text-muted text-uppercase">
+                      Browse account
+                    </label>
+                    <div className="d-flex flex-column gap-1">
+                      {sources.map((s) => {
+                        const meta = sourceMeta(s.source_type)
+                        const active = browseAccountId === s.id
+                        const countForAccount = selectedPlaylists.filter((p) => p.source_id === s.id).length
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            className={`btn btn-sm text-start d-flex align-items-center justify-content-between ${
+                              active ? 'btn-primary' : 'btn-outline-secondary'
+                            }`}
+                            onClick={() => setBrowseAccountId(s.id)}
+                          >
+                            <span>
+                              <i className={`bi ${meta.icon} me-2`}></i>
+                              {s.name}
+                            </span>
+                            {countForAccount > 0 && (
+                              <span className={`badge rounded-pill ${active ? 'bg-light text-primary' : 'bg-primary-subtle text-primary'}`}>
+                                {countForAccount}
+                              </span>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
 
-            {selectedPlaylist && (
-              <div className="card-header bg-primary-subtle d-flex align-items-center justify-content-between border-top-0">
-                <span className="fw-semibold text-primary">
-                  <i className="bi bi-check-circle me-2"></i>
-                  {selectedPlaylist.name}
-                  <span className="text-muted fw-normal ms-2 small">
-                    ({selectedPlaylist.track_count ?? '?'} tracks)
-                  </span>
-                </span>
-                <button
-                  className="btn btn-danger btn-sm"
-                  disabled={jobLoading || !toId}
-                  onClick={handleStartSync}
-                  title={!toId ? 'Select a destination account first' : ''}
-                >
-                  {jobLoading
-                    ? <><span className="spinner-border spinner-border-sm me-1" />Starting…</>
-                    : <><i className="bi bi-play-fill me-1"></i>Start Sync</>
-                  }
-                </button>
+                  {/* Playlist browser with checkboxes */}
+                  <div className="col-md-8">
+                    <label className="form-label small fw-semibold text-muted text-uppercase">
+                      Playlists
+                    </label>
+                    <div className="border rounded" style={{ minHeight: 80 }}>
+                      {browseAccountId ? (
+                        fromLoading ? (
+                          <div className="text-center py-4 text-muted">
+                            <span className="spinner-border spinner-border-sm me-2" />Loading playlists…
+                          </div>
+                        ) : !currentPlaylists?.length ? (
+                          <p className="text-muted small text-center py-3 mb-0">No playlists found for this account.</p>
+                        ) : (
+                          <div className="list-group list-group-flush" style={{ maxHeight: 360, overflowY: 'auto' }}>
+                            {currentPlaylists.map((pl) => {
+                              const checked = isSelected(browseAccountId, pl.id)
+                              return (
+                                <label
+                                  key={pl.id}
+                                  className={`list-group-item list-group-item-action d-flex align-items-center gap-3 ${
+                                    checked ? 'bg-primary-subtle' : ''
+                                  }`}
+                                  style={{ cursor: 'pointer' }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    className="form-check-input flex-shrink-0 m-0"
+                                    checked={checked}
+                                    onChange={() => togglePlaylist(pl)}
+                                  />
+                                  <span className="flex-grow-1 d-flex justify-content-between align-items-center">
+                                    <span>
+                                      <i className="bi bi-collection-play me-2 text-warning"></i>
+                                      {pl.name}
+                                    </span>
+                                    <span className="badge bg-secondary-subtle text-secondary border border-secondary-subtle rounded-pill">
+                                      {pl.track_count ?? '?'} tracks
+                                    </span>
+                                  </span>
+                                </label>
+                              )
+                            })}
+                          </div>
+                        )
+                      ) : (
+                        <div className="text-center py-4 text-muted">
+                          <i className="bi bi-hand-index-thumb me-2"></i>
+                          Select an account on the left to browse its playlists.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Selected playlists pills */}
+                {selectedPlaylists.length > 0 && (
+                  <div className="mt-3 p-3 bg-body-tertiary rounded border">
+                    <div className="d-flex align-items-center justify-content-between mb-2">
+                      <span className="small fw-semibold text-muted">
+                        <i className="bi bi-check-circle me-1 text-success"></i>
+                        {selectedPlaylists.length} playlist{selectedPlaylists.length !== 1 ? 's' : ''} selected
+                      </span>
+                    </div>
+                    <div className="d-flex flex-wrap gap-2">
+                      {selectedPlaylists.map((p) => {
+                        const src = sources.find((s) => s.id === p.source_id)
+                        const meta = src
+                          ? sourceMeta(src.source_type)
+                          : { label: 'Source', icon: 'bi-plug', color: 'text-muted' }
+                        return (
+                          <span
+                            key={plKey(p)}
+                            className="badge rounded-pill bg-light border d-flex align-items-center gap-1 py-2 px-3"
+                          >
+                            <i className={`bi ${meta.icon} ${meta.color}`}></i>
+                            <span className="small">{meta.label} · {p.playlist_name}</span>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-link p-0 ms-1 text-muted"
+                              onClick={() => removePlaylist(p.source_id, p.playlist_id)}
+                            >
+                              <i className="bi bi-x-lg" style={{ fontSize: '0.7rem' }}></i>
+                            </button>
+                          </span>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Next button */}
+                <div className="d-flex justify-content-end mt-3">
+                  <button
+                    className="btn btn-primary"
+                    disabled={selectedPlaylists.length === 0}
+                    onClick={() => setWizardStep(2)}
+                  >
+                    Configure Roles
+                    <i className="bi bi-arrow-right ms-2"></i>
+                  </button>
+                </div>
               </div>
             )}
 
-            <div className="card-body p-0">
-              <PlaylistBrowser
-                playlists={currentPlaylists}
-                loading={fromLoading}
-                onSelect={handleSelectPlaylist}
-              />
-            </div>
+            {/* ── STEP 2: Configure Roles ── */}
+            {wizardStep === 2 && (
+              <div>
+                <div className="d-flex align-items-center justify-content-between mb-3">
+                  <p className="text-muted small mb-0">
+                    For each playlist, choose whether it should act as a <strong>Source</strong> (read tracks from),
+                    a <strong>Destination</strong> (sync tracks to), or <strong>Bidirectional</strong> (both).
+                  </p>
+                  {/* Quick-assign buttons */}
+                  <div className="d-flex gap-1 flex-shrink-0 ms-3">
+                    <span className="small text-muted me-1 align-self-center">Set all:</span>
+                    {ROLE_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        className="btn btn-sm btn-outline-secondary"
+                        onClick={() => setAllRoles(opt.value)}
+                        title={`Set all playlists as ${opt.label}`}
+                      >
+                        <i className={`bi ${opt.icon} me-1`}></i>
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="border rounded overflow-hidden">
+                  <table className="table table-sm table-hover align-middle mb-0">
+                    <thead className="table-light">
+                      <tr>
+                        <th className="ps-3">Platform</th>
+                        <th>Playlist</th>
+                        <th className="text-end pe-3" style={{ width: 320 }}>Role</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedPlaylists.map((p) => {
+                        const src = sources.find((s) => s.id === p.source_id)
+                        const meta = src
+                          ? sourceMeta(src.source_type)
+                          : { label: 'Source', icon: 'bi-plug', color: 'text-muted' }
+                        const roleOpt = ROLE_OPTIONS.find((r) => r.value === p.role)
+                        return (
+                          <tr key={plKey(p)}>
+                            <td className="ps-3">
+                              <span className={`${meta.color}`}>
+                                <i className={`bi ${meta.icon} me-2`}></i>
+                                <span className="fw-semibold small">{src?.name || meta.label}</span>
+                              </span>
+                            </td>
+                            <td>
+                              <div className="d-flex align-items-center gap-2">
+                                <i className="bi bi-collection-play text-warning"></i>
+                                <span className="small">{p.playlist_name}</span>
+                              </div>
+                            </td>
+                            <td className="text-end pe-3">
+                              <div className="d-flex align-items-center justify-content-end gap-2">
+                                <RoleSelector
+                                  role={p.role}
+                                  onChange={(r) => setPlaylistRole(p.source_id, p.playlist_id, r)}
+                                />
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-link text-danger p-0"
+                                  title="Remove from sync"
+                                  onClick={() => removePlaylist(p.source_id, p.playlist_id)}
+                                >
+                                  <i className="bi bi-trash"></i>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Validation messages */}
+                {selectedPlaylists.length > 0 && !canStart && (
+                  <div className="alert alert-warning mt-3 py-2 small mb-0">
+                    <i className="bi bi-exclamation-triangle me-2"></i>
+                    You need at least one <strong>Source</strong> (or Bidirectional) and one <strong>Destination</strong> (or Bidirectional) to start a sync.
+                  </div>
+                )}
+
+                {/* Summary + actions */}
+                <div className="border-top pt-3 mt-3 d-flex align-items-center justify-content-between">
+                  <div className="d-flex align-items-center gap-3">
+                    <button
+                      className="btn btn-outline-secondary btn-sm"
+                      onClick={() => setWizardStep(1)}
+                    >
+                      <i className="bi bi-arrow-left me-1"></i>Back
+                    </button>
+                    <div className="small text-muted">
+                      <span className="me-3">
+                        <i className="bi bi-box-arrow-right me-1 text-info"></i>
+                        <strong>{srcCount}</strong> source{srcCount !== 1 ? 's' : ''}
+                      </span>
+                      <span>
+                        <i className="bi bi-box-arrow-in-right me-1 text-warning"></i>
+                        <strong>{dstCount}</strong> destination{dstCount !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    className="btn btn-danger"
+                    disabled={jobLoading || !canStart}
+                    onClick={handleStartSync}
+                  >
+                    {jobLoading ? (
+                      <>
+                        <span className="spinner-border spinner-border-sm me-1" />
+                        Starting…
+                      </>
+                    ) : (
+                      <>
+                        <i className="bi bi-play-fill me-1"></i>
+                        Start Sync
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
-        )}
+        </div>
 
         {/* ── Active Job View ── */}
         {job && (
@@ -896,7 +1551,7 @@ export default function SyncPage() {
                 </div>
               )}
               <JobProgress job={job} />
-              {unconfirmedMatchCount > 0 && (
+              {!isMultiDestinationJob && unconfirmedMatchCount > 0 && (
                 <div className="d-flex justify-content-end mb-2">
                   <button
                     className="btn btn-sm btn-success"
@@ -909,7 +1564,7 @@ export default function SyncPage() {
               )}
             </div>
 
-            {tracks.length > 0 && (
+            {tracks.length > 0 && !isMultiDestinationJob && (
               <div className="table-responsive">
                 <table className="table table-sm table-hover align-middle mb-0">
                   <thead className="table-light">
@@ -931,6 +1586,50 @@ export default function SyncPage() {
                         jobId={job.id}
                         sourceType={job.source_from?.source_type}
                         targetType={targetType}
+                        dispatch={dispatch}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {tracks.length > 0 && isMultiDestinationJob && (
+              <div className="table-responsive">
+                <table className="table table-sm table-hover align-middle mb-0">
+                  <thead className="table-light">
+                    <tr>
+                      <th style={{ width: 44 }}></th>
+                      <th>Track</th>
+                      <th style={{ width: 60 }}>Duration</th>
+                      {destinationPlaylists.map((dest) => {
+                        const meta = sourceMeta(dest.source.source_type)
+                        return (
+                          <th key={dest.id} className="text-center">
+                            <div className="d-flex flex-column align-items-center">
+                              <span className="small fw-semibold">
+                                <i className={`bi ${meta.icon} ${meta.color} me-1`}></i>
+                                {dest.source.name}
+                              </span>
+                              {dest.playlist_name && (
+                                <span className="text-muted small text-truncate" style={{ maxWidth: 160 }}>
+                                  {dest.playlist_name}
+                                </span>
+                              )}
+                            </div>
+                          </th>
+                        )
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tracks.map((track) => (
+                      <MultiDestinationTrackRow
+                        key={track.id}
+                        track={track}
+                        jobId={job.id}
+                        sourceType={job.source_from?.source_type}
+                        destinations={destinationPlaylists}
                         dispatch={dispatch}
                       />
                     ))}

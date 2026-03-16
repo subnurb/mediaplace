@@ -15,6 +15,7 @@ export const fetchPlaylists = createAsyncThunk(
   },
 )
 
+// Legacy single-source job creation (kept for backward compatibility)
 export const createSyncJob = createAsyncThunk(
   'sync/createJob',
   async ({ sourceFromId, sourceToId, playlistId, playlistName }, { rejectWithValue }) => {
@@ -25,6 +26,19 @@ export const createSyncJob = createAsyncThunk(
         playlist_id: playlistId,
         playlist_name: playlistName,
       })
+      return res.data
+    } catch (err) {
+      return rejectWithValue(err.response?.data?.error || 'Failed to create sync job')
+    }
+  },
+)
+
+// New multi-source / multi-destination job creation
+export const createMultiSyncJob = createAsyncThunk(
+  'sync/createMultiJob',
+  async (payload, { rejectWithValue }) => {
+    try {
+      const res = await api.post('/sync/', payload)
       return res.data
     } catch (err) {
       return rejectWithValue(err.response?.data?.error || 'Failed to create sync job')
@@ -106,12 +120,28 @@ export const rejectTrack = createAsyncThunk(
 
 export const pushToPlaylist = createAsyncThunk(
   'sync/push',
-  async ({ jobId, targetPlaylistId, newPlaylistName }, { rejectWithValue }) => {
+  async ({ jobId, targetPlaylistId, newPlaylistName, destinationId }, { rejectWithValue }) => {
     try {
-      const res = await api.post(`/sync/${jobId}/push/`, {
-        target_playlist_id: targetPlaylistId || null,
-        new_playlist_name: newPlaylistName || '',
-      })
+      let body
+      if (destinationId !== undefined) {
+        // New multi-destination payload: one destination object per call
+        body = {
+          destinations: [
+            {
+              destination_id: destinationId,
+              playlist_id: targetPlaylistId || null,
+              new_playlist_name: newPlaylistName || '',
+            },
+          ],
+        }
+      } else {
+        // Legacy single-destination payload
+        body = {
+          target_playlist_id: targetPlaylistId || null,
+          new_playlist_name: newPlaylistName || '',
+        }
+      }
+      const res = await api.post(`/sync/${jobId}/push/`, body)
       return res.data
     } catch (err) {
       return rejectWithValue(err.response?.data?.error || 'Push failed')
@@ -191,10 +221,51 @@ export const fetchSyncLog = createAsyncThunk(
   },
 )
 
+// Match-level actions for multi-destination jobs
+export const confirmMatch = createAsyncThunk(
+  'sync/confirmMatch',
+  async ({ jobId, matchId }, { rejectWithValue }) => {
+    try {
+      const res = await api.post(`/sync/${jobId}/matches/${matchId}/confirm/`)
+      return res.data
+    } catch (err) {
+      return rejectWithValue(err.response?.data?.error || 'Confirm failed')
+    }
+  },
+)
+
+export const rejectMatch = createAsyncThunk(
+  'sync/rejectMatch',
+  async ({ jobId, matchId }, { rejectWithValue }) => {
+    try {
+      const res = await api.post(`/sync/${jobId}/matches/${matchId}/reject/`)
+      return res.data
+    } catch (err) {
+      return rejectWithValue(err.response?.data?.error || 'Reject failed')
+    }
+  },
+)
+
+export const selectMatchForDestination = createAsyncThunk(
+  'sync/selectMatchForDestination',
+  async ({ jobId, matchId, videoId }, { rejectWithValue }) => {
+    try {
+      const res = await api.post(`/sync/${jobId}/matches/${matchId}/select/`, { video_id: videoId })
+      return res.data
+    } catch (err) {
+      return rejectWithValue(err.response?.data?.error || 'Failed to select match')
+    }
+  },
+)
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function replaceTrack(tracks, updated) {
   return tracks.map((t) => (t.id === updated.id ? updated : t))
+}
+
+function replaceMatch(matches, updated) {
+  return matches.map((m) => (m.id === updated.id ? updated : m))
 }
 
 // ── Slice ─────────────────────────────────────────────────────────────────────
@@ -212,6 +283,11 @@ const syncSlice = createSlice({
     job: null,
     jobLoading: false,
 
+    // Multi-source job setup (local configuration before creating a job)
+    sourcePlaylists: [],   // [{source_id, playlist_id, playlist_name}]
+    destinations: [],      // [source_id]
+    direction: 'one_way',  // 'one_way' | 'bidirectional'
+
     // Push state
     pushLoading: false,
 
@@ -228,6 +304,12 @@ const syncSlice = createSlice({
     },
     clearError: (state) => {
       state.error = null
+    },
+    setSyncConfig: (state, action) => {
+      const { sourcePlaylists, destinations, direction } = action.payload
+      if (sourcePlaylists !== undefined) state.sourcePlaylists = sourcePlaylists
+      if (destinations !== undefined) state.destinations = destinations
+      if (direction) state.direction = direction
     },
   },
   extraReducers: (builder) => {
@@ -260,6 +342,20 @@ const syncSlice = createSlice({
         state.job = action.payload
       })
       .addCase(createSyncJob.rejected, (state, action) => {
+        state.jobLoading = false
+        state.error = action.payload
+      })
+
+      // createMultiSyncJob
+      .addCase(createMultiSyncJob.pending, (state) => {
+        state.jobLoading = true
+        state.error = null
+      })
+      .addCase(createMultiSyncJob.fulfilled, (state, action) => {
+        state.jobLoading = false
+        state.job = action.payload
+      })
+      .addCase(createMultiSyncJob.rejected, (state, action) => {
         state.jobLoading = false
         state.error = action.payload
       })
@@ -387,8 +483,49 @@ const syncSlice = createSlice({
         state.syncLogLoading = false
         state.error = action.payload
       })
+
+      // Match-level updates for multi-destination jobs
+      .addCase(confirmMatch.fulfilled, (state, action) => {
+        const updated = action.payload
+        if (state.job?.tracks) {
+          for (const track of state.job.tracks) {
+            if (track.destination_matches) {
+              track.destination_matches = replaceMatch(track.destination_matches, updated)
+            }
+          }
+        }
+      })
+      .addCase(confirmMatch.rejected, (state, action) => {
+        state.error = action.payload
+      })
+      .addCase(rejectMatch.fulfilled, (state, action) => {
+        const updated = action.payload
+        if (state.job?.tracks) {
+          for (const track of state.job.tracks) {
+            if (track.destination_matches) {
+              track.destination_matches = replaceMatch(track.destination_matches, updated)
+            }
+          }
+        }
+      })
+      .addCase(rejectMatch.rejected, (state, action) => {
+        state.error = action.payload
+      })
+      .addCase(selectMatchForDestination.fulfilled, (state, action) => {
+        const updated = action.payload
+        if (state.job?.tracks) {
+          for (const track of state.job.tracks) {
+            if (track.destination_matches) {
+              track.destination_matches = replaceMatch(track.destination_matches, updated)
+            }
+          }
+        }
+      })
+      .addCase(selectMatchForDestination.rejected, (state, action) => {
+        state.error = action.payload
+      })
   },
 })
 
-export const { clearJob, clearError } = syncSlice.actions
+export const { clearJob, clearError, setSyncConfig } = syncSlice.actions
 export default syncSlice.reducer

@@ -29,10 +29,24 @@ from django.db import close_old_connections
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
-from api.models import AudioFingerprint, SourceConnection, SyncJob, SyncTrack, TrackSource
+from api.models import (
+    AudioFingerprint,
+    SourceConnection,
+    SyncJob,
+    SyncJobPlaylist,
+    SyncTrack,
+    SyncTrackMatch,
+    TrackSource,
+)
 from api.views import require_login
 from domain.sync.services import classify_sync_error
-from music_matcher import classify_confidence, find_youtube_match
+from music_matcher import (
+    classify_confidence,
+    find_youtube_match,
+    score_candidate,
+    normalize_title,
+    normalize_artist,
+)
 from video_creator import create_video
 from youtube_uploader import upload_video_for_source
 
@@ -192,19 +206,148 @@ def sync_list_create(request):
 
     if request.method == "POST":
         try:
-            data = json_module.loads(request.body)
-            source_from = request.user.sources.get(id=data["source_from"])
-            source_to = request.user.sources.get(id=data["source_to"])
-        except (SourceConnection.DoesNotExist, KeyError) as e:
-            return JsonResponse({"error": str(e)}, status=400)
+            data = json_module.loads(request.body or "{}")
+        except json_module.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        # Backward-compatible payload: single source/destination + playlist
+        if "source_from" in data and "source_to" in data:
+            try:
+                source_from = request.user.sources.get(id=data["source_from"])
+                source_to = request.user.sources.get(id=data["source_to"])
+            except (SourceConnection.DoesNotExist, KeyError) as e:
+                return JsonResponse({"error": str(e)}, status=400)
+
+            job = SyncJob.objects.create(
+                user=request.user,
+                source_from=source_from,
+                source_to=source_to,
+                playlist_id=data.get("playlist_id", ""),
+                playlist_name=data.get("playlist_name", "Playlist"),
+                direction=data.get("direction") or "one_way",
+                name=data.get("name", ""),
+            )
+            # Also create SyncJobPlaylist rows so the new UI can display them
+            sp_source = SyncJobPlaylist.objects.create(
+                job=job,
+                source=source_from,
+                playlist_id=job.playlist_id,
+                playlist_name=job.playlist_name,
+                role=SyncJobPlaylist.Role.SOURCE,
+            )
+            SyncJobPlaylist.objects.create(
+                job=job,
+                source=source_to,
+                playlist_id="",
+                playlist_name="",
+                role=SyncJobPlaylist.Role.DESTINATION,
+            )
+            return JsonResponse(job.to_dict(), status=201)
+
+        # Per-playlist role payload: { playlists: [{source_id, playlist_id, playlist_name, role}] }
+        playlists_payload = data.get("playlists")
+        if playlists_payload:
+            VALID_ROLES = {r.value for r in SyncJobPlaylist.Role}
+            has_src = any(p.get("role") in ("source", "both") for p in playlists_payload)
+            has_dst = any(p.get("role") in ("destination", "both") for p in playlists_payload)
+            if not has_src or not has_dst:
+                return JsonResponse(
+                    {"error": "Need at least one source and one destination playlist"},
+                    status=400,
+                )
+
+            try:
+                source_ids = {p["source_id"] for p in playlists_payload}
+                conns = {
+                    s.id: s
+                    for s in request.user.sources.filter(id__in=source_ids)
+                }
+                if len(conns) != len(source_ids):
+                    raise SourceConnection.DoesNotExist("One or more accounts not found")
+            except (KeyError, SourceConnection.DoesNotExist) as exc:
+                return JsonResponse({"error": str(exc)}, status=400)
+
+            has_bidir = any(p.get("role") == "both" for p in playlists_payload)
+            job = SyncJob.objects.create(
+                user=request.user,
+                direction="bidirectional" if has_bidir else "one_way",
+                name=data.get("name", ""),
+            )
+
+            for item in playlists_payload:
+                role = item.get("role", "source")
+                if role not in VALID_ROLES:
+                    role = "source"
+                SyncJobPlaylist.objects.create(
+                    job=job,
+                    source=conns[item["source_id"]],
+                    playlist_id=item.get("playlist_id", ""),
+                    playlist_name=item.get("playlist_name", "") or "",
+                    role=role,
+                )
+
+            return JsonResponse(job.to_dict(), status=201)
+
+        # Legacy multi-source / multi-destination payload
+        sources_payload = data.get("sources") or []
+        dest_ids = data.get("destinations") or []
+        direction = data.get("direction") or "one_way"
+        name = data.get("name", "")
+
+        if not sources_payload or not dest_ids:
+            return JsonResponse(
+                {"error": "Provide at least one source playlist and one destination account"},
+                status=400,
+            )
+
+        try:
+            src_conns = {
+                item["source_id"]: request.user.sources.get(id=item["source_id"])
+                for item in sources_payload
+            }
+            dest_conns = {
+                sid: request.user.sources.get(id=sid)
+                for sid in dest_ids
+            }
+        except (KeyError, SourceConnection.DoesNotExist) as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
 
         job = SyncJob.objects.create(
             user=request.user,
-            source_from=source_from,
-            source_to=source_to,
-            playlist_id=data.get("playlist_id", ""),
-            playlist_name=data.get("playlist_name", "Playlist"),
+            direction=direction,
+            name=name,
         )
+
+        # Create SyncJobPlaylist entries for sources
+        for item in sources_payload:
+            src = src_conns[item["source_id"]]
+            SyncJobPlaylist.objects.create(
+                job=job,
+                source=src,
+                playlist_id=item.get("playlist_id", ""),
+                playlist_name=item.get("playlist_name", "") or "",
+                role=SyncJobPlaylist.Role.SOURCE
+                if direction == "one_way"
+                else SyncJobPlaylist.Role.BOTH,
+            )
+
+        # Create destination entries (may overlap with sources when bidirectional)
+        for sid, dest_src in dest_conns.items():
+            # Avoid duplicating BOTH entries created above
+            existing = job.sync_playlists.filter(source_id=sid).first()
+            if existing:
+                if direction == "bidirectional":
+                    existing.role = SyncJobPlaylist.Role.BOTH
+                    existing.save(update_fields=["role"])
+                continue
+            SyncJobPlaylist.objects.create(
+                job=job,
+                source=dest_src,
+                playlist_id="",
+                playlist_name="",
+                role=SyncJobPlaylist.Role.DESTINATION,
+            )
+
         return JsonResponse(job.to_dict(), status=201)
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -214,11 +357,26 @@ def sync_list_create(request):
 def sync_detail(request, job_id):
     """GET /api/sync/<id>/ → job with all tracks"""
     try:
-        job = request.user.sync_jobs.select_related("source_from", "source_to").get(id=job_id)
+        job = (
+            request.user.sync_jobs
+            .select_related("source_from", "source_to")
+            .prefetch_related("sync_playlists__source", "tracks__destination_matches")
+            .get(id=job_id)
+        )
     except SyncJob.DoesNotExist:
         return JsonResponse({"error": "Job not found"}, status=404)
 
-    return JsonResponse(job.to_dict(include_tracks=True))
+    data = job.to_dict(include_tracks=True)
+
+    # Attach destination_matches per track for the new multi-destination model
+    if data.get("tracks"):
+        matches_by_track = {}
+        for m in SyncTrackMatch.objects.filter(track__job=job):
+            matches_by_track.setdefault(m.track_id, []).append(m.to_dict())
+        for t in data["tracks"]:
+            t["destination_matches"] = matches_by_track.get(t["id"], [])
+
+    return JsonResponse(data)
 
 
 # ── Audio cache ───────────────────────────────────────────────────────────────
@@ -875,6 +1033,112 @@ def _persist_cross_platform_links(job_id: int) -> None:
         logger.info("[sync] job=%s linked %d cross-platform fingerprint pairs", job_id, linked)
 
 
+def _deduplicate_tracks(track_entries):
+    """Group tracks from multiple source playlists into canonical track groups.
+
+    track_entries: iterable of dicts with shape:
+      {
+        "source": SourceConnection,
+        "playlist_id": str,
+        "track": {
+          "id": str,
+          "title": str,
+          "artist": str,
+          "duration_ms": int | None,
+          "artwork_url": str,
+          "permalink_url": str,
+          "position": int,
+          "isrc": str | None,
+        },
+      }
+
+    Returns a list of groups:
+      [{
+        "dedupe_key": str,
+        "canonical": track_dict,
+        "entries": [...original entries...],
+        "playlist_ids": {playlist_id, ...},
+        "source_ids": {source.id, ...},
+      }, ...]
+    """
+    groups = []
+
+    for entry in track_entries:
+        t = entry["track"]
+        title = t.get("title") or ""
+        artist = t.get("artist") or ""
+        duration_ms = t.get("duration_ms")
+        isrc = (t.get("isrc") or "").strip().upper()
+
+        best_group = None
+
+        for g in groups:
+            canon = g["canonical"]
+            c_title = canon.get("title") or ""
+            c_artist = canon.get("artist") or ""
+            c_duration = canon.get("duration_ms")
+            c_isrc = (canon.get("isrc") or "").strip().upper()
+
+            # Strongest key: ISRC match
+            if isrc and c_isrc and isrc == c_isrc:
+                best_group = g
+                break
+
+            # Otherwise, use the same scoring function as the matcher
+            score = score_candidate(
+                source_title=title,
+                source_artist=artist,
+                source_duration_ms=duration_ms,
+                cand_title=c_title,
+                cand_artist=c_artist,
+                cand_duration_sec=(c_duration / 1000.0) if c_duration else None,
+                source_isrc=isrc or None,
+                cand_isrc=c_isrc or None,
+            )
+            if score >= 0.90:
+                best_group = g
+                break
+
+        if not best_group:
+            # Create new group
+            canon = dict(t)
+            # Pre-compute a stable dedupe key for downstream consumers
+            if canon.get("isrc"):
+                key = f"ISRC:{canon['isrc'].strip().upper()}"
+            else:
+                norm_title = normalize_title(title) if title else ""
+                norm_artist = normalize_artist(artist) if artist else ""
+                key = f"META:{norm_title}|{norm_artist}"
+
+            best_group = {
+                "dedupe_key": key,
+                "canonical": canon,
+                "entries": [],
+                "playlist_ids": set(),
+                "source_ids": set(),
+            }
+            groups.append(best_group)
+
+        best_group["entries"].append(entry)
+        best_group["playlist_ids"].add(entry["playlist_id"])
+        best_group["source_ids"].add(entry["source"].id)
+
+        # Prefer canonical metadata from entries that have ISRC or richer fields
+        canon = best_group["canonical"]
+        if not canon.get("isrc") and isrc:
+            canon["isrc"] = isrc
+        if not canon.get("permalink_url") and t.get("permalink_url"):
+            canon["permalink_url"] = t["permalink_url"]
+        if not canon.get("artwork_url") and t.get("artwork_url"):
+            canon["artwork_url"] = t["artwork_url"]
+        if not canon.get("artist") and artist:
+            canon["artist"] = artist
+        if not canon.get("title") and title:
+            canon["title"] = title
+
+    return groups
+
+
 def _run_level3_audio_check(job: SyncJob) -> None:
     """Level 3: fingerprint + compare source vs candidate for UNCERTAIN tracks.
 
@@ -1038,7 +1302,7 @@ def _apply_match_result(result: dict) -> None:
         )
 
 
-# ── User match feedback ───────────────────────────────────────────────────────
+# ── User match feedback (legacy single-destination) ──────────────────────────
 
 @csrf_exempt
 @require_login
@@ -1303,10 +1567,164 @@ def sync_reject_track(request, job_id, track_id):
     return JsonResponse(track.to_dict())
 
 
+# ── User match feedback for multi-destination SyncTrackMatch ─────────────────
+
+
+def _get_match_for_user(request, job_id, match_id):
+    try:
+        job = request.user.sync_jobs.get(id=job_id)
+    except SyncJob.DoesNotExist:
+        return None, JsonResponse({"error": "Job not found"}, status=404)
+
+    try:
+        match = SyncTrackMatch.objects.select_related("track", "destination__source", "track__job").get(
+            id=match_id,
+            track__job=job,
+        )
+    except SyncTrackMatch.DoesNotExist:
+        return None, JsonResponse({"error": "Match not found"}, status=404)
+    return match, None
+
+
+@csrf_exempt
+@require_login
+def sync_confirm_match(request, job_id, match_id):
+    """POST /api/sync/<id>/matches/<match_id>/confirm/"""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    match, error = _get_match_for_user(request, job_id, match_id)
+    if error:
+        return error
+
+    match.user_feedback = "confirmed"
+    match.save(update_fields=["user_feedback"])
+    return JsonResponse(match.to_dict())
+
+
+@csrf_exempt
+@require_login
+def sync_reject_match(request, job_id, match_id):
+    """POST /api/sync/<id>/matches/<match_id>/reject/
+
+    Reject the current candidate for a destination and move to next alternative
+    if available, otherwise clear the match.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    match, error = _get_match_for_user(request, job_id, match_id)
+    if error:
+        return error
+
+    rejected_ids = list(match.rejected_target_ids or [])
+    if match.target_video_id and match.target_video_id not in rejected_ids:
+        rejected_ids.append(match.target_video_id)
+    match.rejected_target_ids = rejected_ids
+    match.user_feedback = ""
+
+    remaining = [a for a in (match.alternatives or []) if a.get("video_id") not in rejected_ids]
+    if remaining:
+        next_alt = remaining[0]
+        match.target_video_id = next_alt["video_id"]
+        match.target_title = next_alt.get("title", "")
+        match.match_confidence = next_alt.get("confidence", 0.0)
+        match.status = classify_confidence(match.match_confidence)
+        match.alternatives = remaining[1:]
+    else:
+        match.target_video_id = ""
+        match.target_title = ""
+        match.match_confidence = 0.0
+        match.status = SyncTrack.Status.NOT_FOUND
+        match.alternatives = []
+
+    match.save(update_fields=[
+        "target_video_id",
+        "target_title",
+        "match_confidence",
+        "status",
+        "user_feedback",
+        "rejected_target_ids",
+        "alternatives",
+    ])
+    return JsonResponse(match.to_dict())
+
+
+@csrf_exempt
+@require_login
+def sync_select_match_alt(request, job_id, match_id):
+    """POST /api/sync/<id>/matches/<match_id>/select/
+
+    Manually select a candidate (by video_id) for a specific destination match.
+    Body: {"video_id": "<id or permalink>"}.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    try:
+        data = json_module.loads(request.body or "{}")
+        video_id = (data.get("video_id") or "").strip()
+    except (json_module.JSONDecodeError, AttributeError):
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    if not video_id:
+        return JsonResponse({"error": "video_id is required"}, status=400)
+
+    match, error = _get_match_for_user(request, job_id, match_id)
+    if error:
+        return error
+
+    alternatives = match.alternatives or []
+    chosen = next((a for a in alternatives if a.get("video_id") == video_id), None)
+    if not chosen:
+        chosen = {"video_id": video_id, "title": "", "artist": "", "confidence": 0.0}
+
+    # Some legacy or inconsistent data might have a missing destination.source.
+    # Be defensive here so the UI doesn't blow up on a None access.
+    dest_source = getattr(match.destination, "source", None)
+    if dest_source is not None:
+        tgt_platform = dest_source.source_type
+        tgt_url = (
+            f"https://www.youtube.com/watch?v={video_id}"
+            if tgt_platform == SourceConnection.SourceType.YOUTUBE_PUBLISH
+            else video_id
+        )
+    else:
+        # Fallback: treat the provided video_id as a generic URL-like identifier.
+        tgt_platform = "unknown"
+        tgt_url = video_id
+
+    match.target_video_id = video_id
+    match.target_title = chosen.get("title", "")
+    match.match_confidence = chosen.get("confidence", 0.0)
+    match.user_feedback = "confirmed"
+    match.status = SyncTrack.Status.UNCERTAIN
+    match.alternatives = [a for a in alternatives if a.get("video_id") != video_id]
+
+    match.save(update_fields=[
+        "target_video_id",
+        "target_title",
+        "match_confidence",
+        "status",
+        "user_feedback",
+        "alternatives",
+    ])
+
+    # Only create / update a TrackSource when we know which platform this belongs to.
+    if tgt_platform != "unknown":
+        TrackSource.objects.update_or_create(
+            platform=tgt_platform,
+            track_id=video_id,
+            defaults={"url": tgt_url, "title": match.target_title},
+        )
+
+    return JsonResponse(match.to_dict())
+
+
 # ── Analysis (background thread) ─────────────────────────────────────────────
 
 def _run_analysis(job_id: int):
-    """Background worker: fetch tracks from source, match against target in parallel."""
+    """Background worker: fetch tracks from sources, match against destinations."""
     from django.db import connection
 
     try:
@@ -1314,77 +1732,241 @@ def _run_analysis(job_id: int):
         job.status = SyncJob.Status.ANALYZING
         job.save(update_fields=["status", "updated_at"])
 
-        # 1. Fetch playlist tracks from the source platform
-        tracks = _get_tracks_for_source(job.source_from, job.playlist_id)
+        # Legacy single-source analysis path (kept for backward compatibility)
+        if not job.sync_playlists.exists():
+            tracks = _get_tracks_for_source(job.source_from, job.playlist_id)
 
-        # 2. Create SyncTrack rows in PENDING state; upsert TrackSource for each source track
+            SyncTrack.objects.filter(job=job).delete()
+            isrc_map: dict[int, str] = {}
+            src_platform = job.source_from.source_type
+            tgt_platform = job.source_to.source_type
+
+            for t in tracks:
+                st = SyncTrack.objects.create(
+                    job=job,
+                    source_track_id=t["id"],
+                    source_title=t["title"],
+                    source_artist=t["artist"],
+                    source_duration_ms=t["duration_ms"],
+                    source_artwork_url=t["artwork_url"],
+                    source_permalink_url=t["permalink_url"],
+                    position=t["position"],
+                )
+                if t.get("isrc"):
+                    isrc_map[st.id] = t["isrc"]
+
+                TrackSource.objects.update_or_create(
+                    platform=src_platform,
+                    track_id=t["id"],
+                    defaults={
+                        "url": t.get("permalink_url", ""),
+                        "title": t.get("title", ""),
+                        "artist": t.get("artist", ""),
+                        "duration_ms": t.get("duration_ms"),
+                        "artwork_url": t.get("artwork_url", ""),
+                    },
+                )
+
+            sync_track_ids = list(
+                SyncTrack.objects.filter(job=job).order_by("position").values_list("id", flat=True)
+            )
+            parallelism = getattr(settings, "SYNC_ANALYSIS_PARALLELISM", 5)
+
+            with ThreadPoolExecutor(max_workers=parallelism) as executor:
+                futs = [
+                    executor.submit(
+                        _match_one_track,
+                        st_id, job.id, isrc_map.get(st_id), tgt_platform, src_platform,
+                    )
+                    for st_id in sync_track_ids
+                ]
+                for f in as_completed(futs):
+                    try:
+                        _apply_match_result(f.result())
+                    except Exception as exc:
+                        logger.error(
+                            "[sync_analysis] job=%s _apply_match_result failed: %s",
+                            job_id,
+                            exc,
+                            exc_info=True,
+                        )
+
+            _run_level3_audio_check(job)
+            try:
+                _persist_cross_platform_links(job.id)
+            except Exception as exc:
+                logger.warning("[sync_analysis] job=%s fp-link step failed: %s", job_id, exc)
+
+            job.status = SyncJob.Status.READY
+            job.save(update_fields=["status", "updated_at"])
+            return
+
+        # ── New multi-source path ──────────────────────────────────────────────
+        source_playlists = list(
+            job.sync_playlists.select_related("source").filter(
+                role__in=[SyncJobPlaylist.Role.SOURCE, SyncJobPlaylist.Role.BOTH]
+            )
+        )
+        dest_playlists = list(
+            job.sync_playlists.select_related("source").filter(
+                role__in=[SyncJobPlaylist.Role.DESTINATION, SyncJobPlaylist.Role.BOTH]
+            )
+        )
+
+        # 1. Fetch tracks from all source playlists
+        track_entries = []
+        for sp in source_playlists:
+            if not sp.playlist_id:
+                continue
+            tracks = _get_tracks_for_source(sp.source, sp.playlist_id)
+            for t in tracks:
+                track_entries.append(
+                    {
+                        "source": sp.source,
+                        "playlist_id": sp.id,
+                        "track": t,
+                    }
+                )
+
+        # 2. Deduplicate across sources
+        groups = _deduplicate_tracks(track_entries)
+
+        # 3. Create SyncTrack rows and TrackSource records
         SyncTrack.objects.filter(job=job).delete()
-        isrc_map: dict[int, str] = {}  # SyncTrack.id → ISRC string
-        src_platform = job.source_from.source_type
-        tgt_platform = job.source_to.source_type
+        isrc_map: dict[int, str] = {}
 
-        for t in tracks:
+        for idx, group in enumerate(groups, start=1):
+            canon = group["canonical"]
             st = SyncTrack.objects.create(
                 job=job,
-                source_track_id=t["id"],
-                source_title=t["title"],
-                source_artist=t["artist"],
-                source_duration_ms=t["duration_ms"],
-                source_artwork_url=t["artwork_url"],
-                source_permalink_url=t["permalink_url"],
-                position=t["position"],
+                source_track_id=canon["id"],
+                source_title=canon.get("title", ""),
+                source_artist=canon.get("artist", ""),
+                source_duration_ms=canon.get("duration_ms"),
+                source_artwork_url=canon.get("artwork_url", ""),
+                source_permalink_url=canon.get("permalink_url", ""),
+                position=idx,
+                dedupe_key=group["dedupe_key"],
             )
-            if t.get("isrc"):
-                isrc_map[st.id] = t["isrc"]
+            if canon.get("isrc"):
+                isrc_map[st.id] = canon["isrc"]
 
-            TrackSource.objects.update_or_create(
-                platform=src_platform,
-                track_id=t["id"],
-                defaults={
-                    "url": t.get("permalink_url", ""),
-                    "title": t.get("title", ""),
-                    "artist": t.get("artist", ""),
-                    "duration_ms": t.get("duration_ms"),
-                    "artwork_url": t.get("artwork_url", ""),
-                },
-            )
+            # Link the track to one of its source playlists (first one is enough
+            # for UI display; library uses fingerprints instead).
+            first_entry = group["entries"][0]
+            sp_id = first_entry["playlist_id"]
+            st.source_playlist_id = sp_id
+            st.save(update_fields=["source_playlist", "dedupe_key"])
 
-        # 3. Match each track against the target platform.
-        #
-        # Strategy for SQLite safety:
-        #   - Workers run in parallel and do ONLY reads + network API calls
-        #     (the expensive part). They return a result dict — no DB writes.
-        #   - The orchestrator thread (here) writes each result serially via
-        #     _apply_match_result(), so SQLite never sees concurrent writers.
-        sync_track_ids = list(
-            SyncTrack.objects.filter(job=job).order_by("position").values_list("id", flat=True)
-        )
+            # Upsert TrackSource for each contributing source track
+            for entry in group["entries"]:
+                t = entry["track"]
+                TrackSource.objects.update_or_create(
+                    platform=entry["source"].source_type,
+                    track_id=t["id"],
+                    defaults={
+                        "url": t.get("permalink_url", ""),
+                        "title": t.get("title", ""),
+                        "artist": t.get("artist", ""),
+                        "duration_ms": t.get("duration_ms"),
+                        "artwork_url": t.get("artwork_url", ""),
+                    },
+                )
+
+        # 4. Match each canonical track against each destination platform.
+        # For bidirectional jobs, we treat all SOURCE/BOTH playlists as both
+        # origins and destinations so missing tracks are suggested in both
+        # directions (A→B and B→A).
+        sync_tracks = list(SyncTrack.objects.filter(job=job).order_by("position"))
         parallelism = getattr(settings, "SYNC_ANALYSIS_PARALLELISM", 5)
 
-        with ThreadPoolExecutor(max_workers=parallelism) as executor:
-            futs = [
-                executor.submit(
-                    _match_one_track,
-                    st_id, job.id, isrc_map.get(st_id), tgt_platform, src_platform,
-                )
-                for st_id in sync_track_ids
-            ]
-            for f in as_completed(futs):
-                try:
-                    _apply_match_result(f.result())
-                except Exception as exc:
-                    logger.error("[sync_analysis] job=%s _apply_match_result failed: %s",
-                                 job_id, exc, exc_info=True)
+        # Build (source_playlist, destination_playlist) pairs depending on direction
+        pairs = []
+        if job.direction == "bidirectional":
+            all_playlists = list(job.sync_playlists.select_related("source").all())
+            for src_pl in all_playlists:
+                for dst_pl in all_playlists:
+                    if src_pl.id == dst_pl.id:
+                        continue
+                    pairs.append((src_pl, dst_pl))
+        else:
+            for dest in dest_playlists:
+                # One-way: use the first source playlist as canonical origin
+                src_pl = source_playlists[0] if source_playlists else dest
+                pairs.append((src_pl, dest))
 
-        # 4. Level 3 — audio feature comparison for UNCERTAIN tracks (parallel)
-        _run_level3_audio_check(job)
+        for src_pl, dest in pairs:
+            # Be defensive: in some legacy or inconsistent rows, the related
+            # SourceConnection can be missing. Skip such pairs instead of
+            # throwing and surfacing a raw AttributeError to the UI.
+            if not getattr(dest, "source_id", None) or not getattr(src_pl, "source_id", None):
+                continue
+            dest_source = getattr(dest, "source", None)
+            src_source = getattr(src_pl, "source", None)
+            if dest_source is None or src_source is None:
+                continue
 
-        # 5. Link cross-platform fingerprints for all strong/confirmed matches so the
-        #    Library can group them immediately without a library re-sync.
-        try:
-            _persist_cross_platform_links(job.id)
-        except Exception as exc:
-            logger.warning("[sync_analysis] job=%s fp-link step failed: %s", job_id, exc)
+            tgt_platform = dest_source.source_type
+            src_platform = src_source.source_type
+
+            with ThreadPoolExecutor(max_workers=parallelism) as executor:
+                futs = [
+                    executor.submit(
+                        _match_one_track,
+                        st.id,
+                        job.id,
+                        isrc_map.get(st.id),
+                        tgt_platform,
+                        src_platform,
+                    )
+                    for st in sync_tracks
+                ]
+                for f in as_completed(futs):
+                    try:
+                        result = f.result()
+                    except Exception as exc:
+                        logger.error("[sync_analysis] job=%s worker failed: %s", job_id, exc, exc_info=True)
+                        continue
+
+                    st_id = result.get("sync_track_id")
+                    if not result.get("ok"):
+                        SyncTrackMatch.objects.update_or_create(
+                            track_id=st_id,
+                            destination=dest,
+                            defaults={
+                                "status": SyncTrack.Status.FAILED,
+                                "error": result.get("error", "")[:500],
+                            },
+                        )
+                        continue
+
+                    video_id = result["video_id"]
+                    confidence = result["confidence"]
+                    matched_title = result["matched_title"]
+                    status = classify_confidence(confidence) if video_id else SyncTrack.Status.NOT_FOUND
+
+                    SyncTrackMatch.objects.update_or_create(
+                        track_id=st_id,
+                        destination=dest,
+                        defaults={
+                            "target_video_id": video_id,
+                            "target_title": matched_title,
+                            "match_confidence": confidence,
+                            "status": status,
+                            "alternatives": result["alternatives"],
+                        },
+                    )
+
+                    if video_id and result.get("tgt_url"):
+                        TrackSource.objects.update_or_create(
+                            platform=result["tgt_platform"],
+                            track_id=video_id,
+                            defaults={"url": result["tgt_url"], "title": matched_title},
+                        )
+
+        # TODO: Level-3 and fingerprint linking for multi-destination paths could
+        # reuse _run_level3_audio_check and _persist_cross_platform_links with
+        # minor extensions; for now we keep Level 1+2 behavior for new jobs.
 
         job.status = SyncJob.Status.READY
         job.save(update_fields=["status", "updated_at"])
@@ -1486,7 +2068,7 @@ def _add_to_playlist(source_to, playlist_id: str, track_ids: list) -> dict:
 
 
 def _run_push(job_id: int, target_playlist_id: str | None, new_playlist_name: str) -> None:
-    """Background worker: push eligible tracks to the target playlist."""
+    """Background worker: push eligible tracks to the target playlist (legacy path)."""
     from django.db import connection
     from django.utils import timezone
 
@@ -1656,14 +2238,19 @@ def _run_push(job_id: int, target_playlist_id: str | None, new_playlist_name: st
 def sync_push(request, job_id):
     """POST /api/sync/<id>/push/
 
-    Body: {"target_playlist_id": "PLxxx"|null, "new_playlist_name": "Name"|""}
+    Legacy body:
+      {"target_playlist_id": "PLxxx"|null, "new_playlist_name": "Name"|""}
 
-    Eligibility: tracks with status=matched or status=uploaded are added automatically.
-    Tracks with status=uncertain are added only if user_feedback='confirmed'.
-    Skipped, not_found, failed tracks are ignored.
+    Multi-destination body:
+      {
+        "destinations": [
+          {"playlist_id": "PLxxx", "new_playlist_name": "Name", "destination_id": 12},
+          ...
+        ]
+      }
 
-    Starts a background thread; job status transitions READY → SYNCING → DONE.
-    Poll GET /api/sync/<id>/ to observe progress.
+    For multi-destination jobs we currently support a single destination at a time;
+    the frontend can call this endpoint once per destination.
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -1677,16 +2264,44 @@ def sync_push(request, job_id):
         return JsonResponse({"error": "Push already in progress"}, status=409)
 
     try:
-        data = json_module.loads(request.body)
+        data = json_module.loads(request.body or "{}")
     except Exception:
         data = {}
 
-    target_playlist_id = data.get("target_playlist_id") or ""
-    new_playlist_name = data.get("new_playlist_name") or ""
+    # Legacy single-destination push
+    if "target_playlist_id" in data or "new_playlist_name" in data:
+        target_playlist_id = data.get("target_playlist_id") or ""
+        new_playlist_name = data.get("new_playlist_name") or ""
+
+        if not target_playlist_id and not new_playlist_name:
+            return JsonResponse(
+                {"error": "Provide either target_playlist_id or new_playlist_name"}, status=400
+            )
+
+        thread = threading.Thread(
+            target=_run_push,
+            args=(job_id, target_playlist_id or None, new_playlist_name),
+            daemon=True,
+        )
+        thread.start()
+        return JsonResponse({"status": "syncing"})
+
+    # Multi-destination push: use the first destination entry (frontend calls once per dest)
+    destinations = data.get("destinations") or []
+    if not destinations:
+        return JsonResponse(
+            {"error": "Provide either legacy target_playlist_id/new_playlist_name or a destinations list"},
+            status=400,
+        )
+
+    dest = destinations[0]
+    target_playlist_id = dest.get("playlist_id") or ""
+    new_playlist_name = dest.get("new_playlist_name") or ""
 
     if not target_playlist_id and not new_playlist_name:
         return JsonResponse(
-            {"error": "Provide either target_playlist_id or new_playlist_name"}, status=400
+            {"error": "Each destination needs playlist_id or new_playlist_name"},
+            status=400,
         )
 
     thread = threading.Thread(
@@ -1794,7 +2409,7 @@ def sync_log_view(request):
     jobs = (
         request.user.sync_jobs
         .select_related("source_from", "source_to")
-        .prefetch_related("tracks")
+        .prefetch_related("tracks", "sync_playlists__source")
         .order_by("-created_at")
     )
 
@@ -1827,6 +2442,41 @@ def sync_log_view(request):
         job_data["stats"] = stats
         job_data["total_tracks"] = total
         job_data["unsynced_tracks"] = unsynced
+
+        # For multi-destination jobs, summarize destinations and unsynced per destination
+        playlists = list(job.sync_playlists.select_related("source").all())
+        if playlists:
+            dest_playlists = [
+                sp for sp in playlists
+                if sp.role in (SyncJobPlaylist.Role.DESTINATION, SyncJobPlaylist.Role.BOTH)
+            ]
+            dest_summaries = []
+            for dest in dest_playlists:
+                dest_unsynced = []
+                for t in tracks:
+                    for m in t.destination_matches.filter(destination=dest):
+                        needs_attention = m.status in {
+                            SyncTrack.Status.NOT_FOUND,
+                            SyncTrack.Status.UNCERTAIN,
+                            SyncTrack.Status.FAILED,
+                        }
+                        if needs_attention and not m.pushed_to_playlist:
+                            d = t.to_dict()
+                            d["destination_match"] = m.to_dict()
+                            dest_unsynced.append(d)
+                dest_summaries.append(
+                    {
+                        "id": dest.id,
+                        "source": dest.source.to_dict(),
+                        "playlist_id": dest.playlist_id,
+                        "playlist_name": dest.playlist_name,
+                        "role": dest.role,
+                        "unsynced_count": len(dest_unsynced),
+                        "unsynced_tracks": dest_unsynced,
+                    }
+                )
+            job_data["destination_summaries"] = dest_summaries
+
         result.append(job_data)
 
     return JsonResponse({"jobs": result})
