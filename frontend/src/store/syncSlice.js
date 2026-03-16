@@ -205,6 +205,8 @@ const syncSlice = createSlice({
     // Playlists per source id: { [sourceId]: [...] }
     playlists: {},
     playlistsLoading: false,
+    // Per-source loading state: { [sourceId]: true/false }
+    playlistsLoadingById: {},
 
     // Active sync job
     job: null,
@@ -231,16 +233,20 @@ const syncSlice = createSlice({
   extraReducers: (builder) => {
     builder
       // fetchPlaylists
-      .addCase(fetchPlaylists.pending, (state) => {
+      .addCase(fetchPlaylists.pending, (state, action) => {
         state.playlistsLoading = true
+        state.playlistsLoadingById[action.meta.arg] = true
         state.error = null
       })
       .addCase(fetchPlaylists.fulfilled, (state, action) => {
-        state.playlistsLoading = false
+        state.playlistsLoadingById[action.payload.sourceId] = false
         state.playlists[action.payload.sourceId] = action.payload.playlists
+        // Global flag is false only when no source is still loading
+        state.playlistsLoading = Object.values(state.playlistsLoadingById).some(Boolean)
       })
       .addCase(fetchPlaylists.rejected, (state, action) => {
-        state.playlistsLoading = false
+        state.playlistsLoadingById[action.meta.arg] = false
+        state.playlistsLoading = Object.values(state.playlistsLoadingById).some(Boolean)
         state.error = action.payload
       })
 

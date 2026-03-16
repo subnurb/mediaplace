@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
 import { fetchSyncLog, loadJob } from '../store/syncSlice'
-import { setActiveTool } from '../store/uiSlice'
+import { useNavigate } from 'react-router-dom'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -154,6 +154,12 @@ function JobCard({ job, onResume }) {
             {job.source_to?.name ?? toMeta.label}
             <span className="ms-3 text-muted">{fmtDate(job.created_at)}</span>
           </div>
+          {job.status === 'failed' && job.error_message && (
+            <div className="small text-danger mt-1">
+              <i className="bi bi-exclamation-triangle me-1"></i>
+              {job.error_message}
+            </div>
+          )}
         </div>
 
         <div className="d-flex gap-2 flex-shrink-0">
@@ -209,6 +215,7 @@ function JobCard({ job, onResume }) {
 
 export default function SyncLogPage() {
   const dispatch = useDispatch()
+  const navigate = useNavigate()
   const { syncLog, syncLogLoading, error } = useSelector((s) => s.sync)
   const [filter, setFilter] = useState('all')  // 'all' | 'attention'
 
@@ -219,7 +226,7 @@ export default function SyncLogPage() {
   async function handleResume(jobId) {
     const result = await dispatch(loadJob(jobId))
     if (result.meta.requestStatus === 'fulfilled') {
-      dispatch(setActiveTool('sync'))
+      navigate('/sync')
     }
   }
 

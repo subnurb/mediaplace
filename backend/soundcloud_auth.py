@@ -1,4 +1,4 @@
-"""SoundCloud OAuth 2.0 helpers.
+"""SoundCloud OAuth 2.1 helpers (PKCE required as of Oct 2024).
 
 Credentials are read from Django settings (config/settings_private.py):
   SOUNDCLOUD_CLIENT_ID
@@ -6,16 +6,19 @@ Credentials are read from Django settings (config/settings_private.py):
   SOUNDCLOUD_REDIRECT_URI  (optional — defaults to localhost)
 
 The redirect URI must also be registered in the SoundCloud app settings.
+See https://developers.soundcloud.com/docs/api/guide
 """
 
+import base64
+import hashlib
 import json
-import secrets
+import os
 import urllib.parse
 
 import requests as http
 
-_AUTHORIZE_URL = "https://secure.soundcloud.com/connect"
-_TOKEN_URL = "https://api.soundcloud.com/oauth2/token"
+_AUTHORIZE_URL = "https://secure.soundcloud.com/authorize"
+_TOKEN_URL = "https://secure.soundcloud.com/oauth/token"
 _ME_URL = "https://api.soundcloud.com/me"
 
 
@@ -30,21 +33,36 @@ def _cfg():
     )
 
 
+def _pkce_pair():
+    """Return (code_verifier, code_challenge) for PKCE S256 (required by OAuth 2.1)."""
+    verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return verifier, challenge
+
+
 def get_auth_url(user):
-    """Return (auth_url, state) to redirect the user to SoundCloud's consent screen."""
+    """Return (auth_url, state) to redirect the user to SoundCloud's consent screen.
+
+    State format: "{user_id}.{code_verifier}" so the callback can pass code_verifier
+    into the token exchange (PKCE required by SoundCloud OAuth 2.1).
+    """
     client_id, client_secret, redirect_uri = _cfg()
     if not client_id or not client_secret:
         raise ValueError(
             "SoundCloud credentials not configured. "
             "Set SOUNDCLOUD_CLIENT_ID and SOUNDCLOUD_CLIENT_SECRET in settings_private.py."
         )
-    state = f"{user.id}.{secrets.token_urlsafe(16)}"
+    verifier, challenge = _pkce_pair()
+    state = f"{user.id}.{verifier}"
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": "non-expiring",
         "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
         # Force SoundCloud to show the login form even when the user has an
         # active session, allowing them to sign in as a different account.
         "display": "popup",
@@ -53,8 +71,8 @@ def get_auth_url(user):
     return auth_url, state
 
 
-def exchange_code_for_user(user, code):
-    """Exchange an authorization code for an access token and persist as a SourceConnection.
+def exchange_code_for_user(user, code, code_verifier):
+    """Exchange an authorization code + PKCE verifier for an access token and persist as a SourceConnection.
 
     Deduplicates by SoundCloud user ID stored in config, so reconnecting the
     same account updates the token in place.
@@ -63,7 +81,7 @@ def exchange_code_for_user(user, code):
 
     client_id, client_secret, redirect_uri = _cfg()
 
-    # Exchange code → token
+    # Exchange code + code_verifier (PKCE) → token (OAuth 2.1)
     resp = http.post(
         _TOKEN_URL,
         data={
@@ -72,6 +90,7 @@ def exchange_code_for_user(user, code):
             "client_secret": client_secret,
             "redirect_uri": redirect_uri,
             "code": code,
+            "code_verifier": code_verifier,
         },
         timeout=15,
     )
@@ -79,10 +98,10 @@ def exchange_code_for_user(user, code):
     token_data = resp.json()
     access_token = token_data["access_token"]
 
-    # Fetch the user's SoundCloud profile to get username + stable ID
+    # Fetch the user's SoundCloud profile to get username + stable ID (Bearer per API guide)
     me_resp = http.get(
         _ME_URL,
-        headers={"Authorization": f"OAuth {access_token}"},
+        headers={"Authorization": f"Bearer {access_token}"},
         timeout=10,
     )
     me_resp.raise_for_status()

@@ -117,6 +117,45 @@ python manage.py runserver
 
 Django runs at **http://localhost:8000**
 
+#### Development server with HTTPS (optional)
+
+To serve over HTTPS and optionally redirect HTTP → HTTPS, use [django-sslserver](https://github.com/teddziuba/django-sslserver) (included in `requirements.txt`):
+
+**HTTPS only (single process):**
+
+```bash
+python manage.py runsslserver 8000
+```
+
+Then use **https://localhost:8000**. The browser will warn about the self-signed certificate; accept it for localhost.
+
+If the **frontend** (Vite) is also running and proxies `/api` to the backend, point the proxy at HTTPS so “Connect with Google” and other API calls work. In the `frontend/` directory create or edit `.env.local` and set:
+
+```bash
+VITE_API_TARGET=https://localhost:8000
+```
+
+Restart `npm run dev` so the proxy uses the HTTPS backend. If you see **proxy error: /api/… ECONNRESET**, the backend is likely running with HTTPS while the proxy is still using HTTP: ensure `VITE_API_TARGET=https://localhost:8000` is in `frontend/.env.local` and restart the frontend dev server; and ensure the Django backend is running (`python manage.py runsslserver 8000`).
+
+**HTTPS + HTTP redirect (two processes):**
+
+1. Terminal 1 — HTTPS server:
+   ```bash
+   python manage.py runsslserver 8443
+   ```
+2. Terminal 2 — HTTP server (redirects to HTTPS):
+   ```bash
+   python manage.py runserver 8000
+   ```
+3. In `config/settings_private.py` set:
+   ```python
+   USE_HTTPS_DEV_REDIRECT = True
+   HTTPS_DEV_PORT = 8443
+   ```
+   Then **http://localhost:8000** redirects to **https://localhost:8443**.
+
+**OAuth when backend is HTTPS:** Set redirect URIs to **https** in `settings_private.py` or Google will redirect to `http://localhost:8000/...` and the page will be unreachable. Set `OAUTH_REDIRECT_URI = "https://localhost:8000/api/auth/callback/"` and `GOOGLE_LOGIN_REDIRECT_URI = "https://localhost:8000/api/auth/google/callback/"`. In Google Cloud Console → Credentials → your OAuth client → Authorized redirect URIs, add those two https URIs and save. Then "Connect YouTube" and "Continue with Google" callbacks will load.
+
 ### 5 — Frontend
 
 ```bash
@@ -154,6 +193,9 @@ mediaplace/
 │   ├── video_creator.py      FFmpeg video assembly
 │   ├── url_downloader.py     yt-dlp audio + cover download
 │   ├── ffmpeg_utils.py       FFmpeg path discovery
+│   ├── spotify_auth.py       Spotify PKCE OAuth, token storage in SourceConnection
+│   ├── spotify_auth_manager.py  Spotipy auth manager (reads tokens from SourceConnection)
+│   ├── spotify_service.py    Spotify Web API via Spotipy (playlists, search, push)
 │   └── client_secrets.json   ← you provide this
 │
 └── frontend/                 React + Vite
@@ -162,6 +204,8 @@ mediaplace/
         ├── pages/            Dashboard, AuthPage
         └── components/       Layout, JobStatus, upload tabs
 ```
+
+**Spotify:** The backend uses [Spotipy](https://spotipy.readthedocs.io/) for all Spotify Web API calls (playlists, search, add tracks). OAuth (PKCE) and token storage remain in `spotify_auth` and `SourceConnection`; `spotify_auth_manager` adapts that storage for Spotipy’s auth manager interface.
 
 ---
 
@@ -221,3 +265,7 @@ python manage.py flush_test_data --yes
 | `DJANGO_SECRET_KEY`   | dev key                                    | Set a strong random value in production  |
 | `OAUTH_REDIRECT_URI`  | `http://localhost:8000/api/auth/callback/` | Must match Google Console                |
 | `FRONTEND_URL`        | `http://localhost:5173`                    | Where to redirect after OAuth            |
+
+**Spotify:** [Redirect URI rules](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri) do not allow `localhost`. Use `http://127.0.0.1:8000/api/auth/spotify/callback/` (or `https://127.0.0.1:8000/...` for HTTPS) and add that exact URI in the Spotify Developer Dashboard.
+
+In **Development Mode**, only up to 5 Spotify users can use your app, and each must be added under **Users and access** in the app settings; otherwise API calls return 403 ("user may not be registered"). There is no setting or client secret that changes this — it is a Spotify policy. To allow **any** user to connect without an allowlist, the app must be in **Extended Quota Mode**. As of May 2025, Spotify only accepts Extended Quota applications from **organizations** (not individuals), with requirements such as commercial viability, key market availability, and at least 250k monthly active users. See [Quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) and the [Extended Access criteria](https://developer.spotify.com/blog/2025-04-15-updating-the-criteria-for-web-api-extended-access) for details. For a multi-user product like MediaPlace, plan on either keeping a small allowlist (dev) or applying for Extended Quota when you meet Spotify’s criteria.

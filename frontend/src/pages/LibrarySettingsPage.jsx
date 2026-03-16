@@ -8,7 +8,7 @@ import {
   stopLibrarySync,
   syncLibraryPlaylist,
 } from '../store/librarySlice'
-import { setActiveTool } from '../store/uiSlice'
+// Router handles active page highlighting
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -228,7 +228,6 @@ export default function LibrarySettingsPage() {
   const pollRef = useRef(null)
 
   useEffect(() => {
-    dispatch(setActiveTool('library-settings'))
     dispatch(fetchLibrarySettings())
   }, [dispatch])
 
